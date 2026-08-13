@@ -1,3 +1,8 @@
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const packageJson = require("../package.json") as { version: string };
+
 export async function runCli(argv: string[]): Promise<number> {
   const command = argv[0];
 
@@ -19,7 +24,7 @@ export async function runCli(argv: string[]): Promise<number> {
 function printHelp(): void {
   console.log(
     [
-      "Usage: PACKAGE_NAME <command> [options]",
+      "Usage: suzukuri <command> [options]",
       "",
       "Commands:",
       "  --help       Show this help",
@@ -29,6 +34,5 @@ function printHelp(): void {
 }
 
 function getVersion(): string {
-  // TODO: replace with real package metadata (see docs on version wiring).
-  return "0.0.1";
+  return packageJson.version;
 }

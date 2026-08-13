@@ -1,10 +1,18 @@
 {
-  "name": "@OWNER/PACKAGE_NAME",
-  "version": "0.0.1",
-  "description": "TODO: one-line description",
+  "name": "@yohn-jp/suzukuri",
+  "version": "0.1.0",
+  "description": "Deterministic bounded semantic projections for CLI and library consumers.",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "bin": {
-    "PACKAGE_NAME": "dist/index.js"
+    "suzukuri": "dist/cli-entry.js"
   },
   "files": [
     "dist",
@@ -46,11 +54,15 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/REPO_NAME.git"
+    "url": "git+https://github.com/yohn-jp/suzukuri.git"
   },
-  "homepage": "https://github.com/OWNER/REPO_NAME#readme",
+  "homepage": "https://github.com/yohn-jp/suzukuri#readme",
   "bugs": {
-    "url": "https://github.com/OWNER/REPO_NAME/issues"
+    "url": "https://github.com/yohn-jp/suzukuri/issues"
   },
-  "keywords": []
+  "keywords": [
+    "semantic",
+    "projection",
+    "cli"
+  ]
 }
