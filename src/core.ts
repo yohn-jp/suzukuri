@@ -55,10 +55,47 @@ export interface SemanticContract<TSemantic = unknown> extends ComponentIdentity
   normalize?(value: unknown): TSemantic;
 }
 
+/** A semantic field or collection that may be reduced when the budget is tight. */
+export interface SemanticPriority {
+  /** Dot-separated path in the typed projection. */
+  readonly path?: string;
+  /** Aliases accepted for adapter/view ergonomics. */
+  readonly key?: string;
+  readonly field?: string;
+  readonly name?: string;
+  /** Lower numbers are retained before higher numbers. Array order breaks ties. */
+  readonly priority?: number;
+  readonly rank?: number;
+  readonly order?: number;
+  readonly required?: boolean;
+}
+
+export type SemanticPriorityDeclaration = SemanticPriority | string;
+
+export type SemanticReductionKind =
+  "ansi-removal" | "path-deduplication" | "repeated-message-folding" | "stack-frame-collapse";
+
+export interface SemanticReduction {
+  readonly kind: SemanticReductionKind | string;
+  readonly path?: string;
+  readonly priority?: number;
+}
+
+export type SemanticReductionDeclaration = SemanticReduction | SemanticReductionKind | string;
+
 export interface ViewMeaning {
   readonly required: readonly string[];
   readonly preserved: readonly string[];
   readonly discarded: readonly string[];
+  /** Ordered high-to-low semantic priorities for optional fields/collections. */
+  readonly priorities?: readonly SemanticPriorityDeclaration[] | Readonly<Record<string, number>>;
+  /** Singular alias for integrations that use a priority map/list. */
+  readonly priority?: readonly SemanticPriorityDeclaration[] | Readonly<Record<string, number>>;
+  /** Explicitly optional paths, useful when no priority object is needed. */
+  readonly optional?: readonly string[];
+  /** Representation reductions are opt-in and contract-controlled. */
+  readonly reductions?: readonly SemanticReductionDeclaration[];
+  readonly allowedReductions?: readonly SemanticReductionDeclaration[];
 }
 
 export interface ViewProjectInput {
@@ -75,6 +112,14 @@ export interface ViewProjection<TProjection = unknown> {
   readonly loss?: LossMetadata | LossState;
 }
 
+export interface ViewReduceInput<TProjection = unknown> {
+  readonly projection: ViewProjection<TProjection>;
+  readonly source: ProjectionSource;
+  readonly budget: Budget;
+  readonly renderer: Renderer;
+  readonly meaning: ViewMeaning;
+}
+
 export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly semanticType: string;
   readonly meaning?: ViewMeaning;
@@ -84,7 +129,14 @@ export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly requiredMeaning?: readonly string[];
   readonly preservedMeaning?: readonly string[];
   readonly discardedMeaning?: readonly string[];
+  readonly priorities?: readonly SemanticPriorityDeclaration[] | Readonly<Record<string, number>>;
+  readonly priority?: readonly SemanticPriorityDeclaration[] | Readonly<Record<string, number>>;
+  readonly optional?: readonly string[];
+  readonly reductions?: readonly SemanticReductionDeclaration[];
+  readonly allowedReductions?: readonly SemanticReductionDeclaration[];
   project(input: ViewProjectInput): TProjection | ViewProjection<TProjection>;
+  /** Optional view-owned reduction hook for typed projections with custom semantics. */
+  readonly reduce?: (input: ViewReduceInput<TProjection>) => TProjection | ViewProjection<TProjection>;
 }
 
 export type BudgetUnit = "utf8-bytes";
@@ -104,6 +156,7 @@ export interface RenderContext {
   readonly view: ComponentIdentity;
   readonly meaning: ViewMeaning;
   readonly projection: ViewProjection;
+  readonly loss: LossMetadata;
 }
 
 export interface RenderedOutput {
@@ -120,9 +173,18 @@ export interface Renderer extends ComponentIdentity {
 export type Completeness = "complete" | "partial";
 export type LossState = "none" | "partial" | "total";
 
+export interface LossReduction {
+  readonly kind: string;
+  readonly path?: string;
+  readonly count?: number;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
 export interface LossMetadata {
   readonly state: LossState;
   readonly discarded: readonly string[];
+  readonly reductions?: readonly LossReduction[];
+  readonly discardedCounts?: Readonly<Record<string, number>>;
 }
 
 export interface ProjectionRequest {
@@ -189,7 +251,8 @@ export type SuzukuriErrorCode =
   | "SEMANTIC_TYPE_MISMATCH"
   | "VIEW_PROJECTION_FAILED"
   | "RENDER_FAILED"
-  | "BUDGET_EXCEEDED";
+  | "BUDGET_EXCEEDED"
+  | "BUDGET_TOO_SMALL";
 
 export interface StableError {
   readonly code: SuzukuriErrorCode;
@@ -213,6 +276,7 @@ const ERROR_MESSAGES: Record<SuzukuriErrorCode, string> = {
   VIEW_PROJECTION_FAILED: "The view could not project the semantic value.",
   RENDER_FAILED: "The renderer could not render the projection.",
   BUDGET_EXCEEDED: "The rendered projection exceeds its UTF-8 byte budget.",
+  BUDGET_TOO_SMALL: "The UTF-8 byte budget is too small for required semantic meaning.",
 };
 
 export class SuzukuriError extends Error {
@@ -424,7 +488,18 @@ export class ProjectionCore {
     this.adapters.registerMany(options.adapters ?? []);
     this.semanticContracts.registerMany(options.semanticContracts ?? options.contracts ?? []);
     this.views.registerMany(options.views ?? []);
-    this.renderers.registerMany(options.renderers ?? []);
+    const renderers = options.renderers !== undefined ? [...options.renderers] : undefined;
+    const shouldLoadStandardRenderers = renderers === undefined || renderers.length === 0;
+    if (renderers !== undefined) {
+      this.renderers.registerMany(renderers);
+    }
+    if (shouldLoadStandardRenderers) {
+      for (const renderer of standardRenderers()) {
+        if (!this.renderers.has(renderer.id)) {
+          this.renderers.register(renderer);
+        }
+      }
+    }
   }
 
   registerAdapter(adapter: Adapter): this {
@@ -508,35 +583,52 @@ export class ProjectionCore {
       throw failure("VIEW_PROJECTION_FAILED", { view: identityOf(view) }, error);
     }
 
-    let rendered: NormalizedRenderedOutput;
-    try {
-      rendered = normalizeRenderedOutput(
-        renderer.render(projected.value, {
-          source,
-          budget,
-          adapter: identityOf(adapter),
-          semanticContract: identityOf(contract),
-          view: identityOf(view),
-          meaning,
-          projection: projected,
-        }),
-      );
-    } catch (error) {
-      throw failure("RENDER_FAILED", { renderer: identityOf(renderer) }, error);
+    const initialLoss = mergeLoss(meaning, projected.loss, undefined);
+    let finalProjected = projected;
+    let rendered = renderProjection(renderer, source, budget, adapter, contract, view, meaning, projected, initialLoss);
+    if (rendered.bytes.byteLength > budget.maxBytes) {
+      const fitted = fitProjectionToBudget({
+        source,
+        budget,
+        adapter,
+        contract,
+        view,
+        renderer,
+        meaning,
+        projection: projected,
+        initial: rendered,
+      });
+      finalProjected = fitted.projection;
+      rendered = fitted.rendered;
     }
 
     const outputSize = rendered.bytes.byteLength;
     if (outputSize > budget.maxBytes) {
-      throw new SuzukuriError("BUDGET_EXCEEDED", undefined, {
+      const requiredMinimum = fittedRequiredMinimum(
+        source,
+        budget,
+        adapter,
+        contract,
+        view,
+        renderer,
+        meaning,
+        projected,
+      );
+      throw new SuzukuriError("BUDGET_TOO_SMALL", undefined, {
+        requestedBudget: budget.maxBytes,
+        requested: budget.maxBytes,
         budget: budget.maxBytes,
+        requiredMinimum,
+        requiredMinimumBytes: requiredMinimum,
+        requiredMinimumSize: requiredMinimum,
         outputSize,
         renderer: identityOf(renderer),
       });
     }
 
     const completeness: Completeness =
-      projected.completeness === "partial" || rendered.completeness === "partial" ? "partial" : "complete";
-    const loss = mergeLoss(meaning, projected.loss, rendered.loss);
+      finalProjected.completeness === "partial" || rendered.completeness === "partial" ? "partial" : "complete";
+    const loss = mergeLoss(meaning, finalProjected.loss, rendered.loss);
     const adapterIdentity = identityOf(adapter);
     const contractIdentity = identityOf(contract);
     const viewIdentity = identityOf(view);
@@ -606,7 +698,12 @@ export function normalizeViewMeaning(view: View): ViewMeaning {
     view.discarded !== undefined ||
     view.requiredMeaning !== undefined ||
     view.preservedMeaning !== undefined ||
-    view.discardedMeaning !== undefined;
+    view.discardedMeaning !== undefined ||
+    view.priorities !== undefined ||
+    view.priority !== undefined ||
+    view.optional !== undefined ||
+    view.reductions !== undefined ||
+    view.allowedReductions !== undefined;
   if (!declared) {
     throw new SuzukuriError("INVALID_COMPONENT", undefined, {
       componentType: "view",
@@ -620,6 +717,9 @@ export function normalizeViewMeaning(view: View): ViewMeaning {
     required: meaning?.required ?? view.required ?? view.requiredMeaning ?? [],
     preserved: meaning?.preserved ?? view.preserved ?? view.preservedMeaning ?? [],
     discarded: meaning?.discarded ?? view.discarded ?? view.discardedMeaning ?? [],
+    priorities: meaning?.priorities ?? meaning?.priority ?? view.priorities ?? view.priority ?? [],
+    optional: meaning?.optional ?? view.optional ?? [],
+    reductions: meaning?.reductions ?? meaning?.allowedReductions ?? view.reductions ?? view.allowedReductions ?? [],
   });
 }
 
@@ -628,6 +728,542 @@ interface NormalizedRenderedOutput {
   readonly bytes: Uint8Array;
   readonly completeness?: Completeness;
   readonly loss?: LossMetadata;
+}
+
+interface BudgetFitInput {
+  readonly source: ProjectionSource;
+  readonly budget: Budget;
+  readonly adapter: Adapter;
+  readonly contract: SemanticContract;
+  readonly view: View;
+  readonly renderer: Renderer;
+  readonly meaning: ViewMeaning;
+  readonly projection: ViewProjection;
+  readonly initial: NormalizedRenderedOutput;
+}
+
+interface BudgetFitResult {
+  readonly projection: ViewProjection;
+  readonly rendered: NormalizedRenderedOutput;
+}
+
+interface ReductionOperation {
+  readonly kind: string;
+  readonly path?: string;
+  readonly count?: number;
+  readonly operationKey?: string;
+  apply(value: unknown): unknown;
+}
+
+function renderProjection(
+  renderer: Renderer,
+  source: ProjectionSource,
+  budget: Budget,
+  adapter: Adapter,
+  contract: SemanticContract,
+  view: View,
+  meaning: ViewMeaning,
+  projection: ViewProjection,
+  loss: LossMetadata,
+): NormalizedRenderedOutput {
+  try {
+    return normalizeRenderedOutput(
+      renderer.render(projection.value, {
+        source,
+        budget,
+        adapter: identityOf(adapter),
+        semanticContract: identityOf(contract),
+        view: identityOf(view),
+        meaning,
+        projection,
+        loss,
+      }),
+    );
+  } catch (error) {
+    throw failure("RENDER_FAILED", { renderer: identityOf(renderer) }, error);
+  }
+}
+
+function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
+  let projection = input.projection;
+  let rendered = input.initial;
+  let currentBytes = rendered.bytes.byteLength;
+  const normalizedMeaning = freezeMeaning(input.meaning);
+
+  if (input.view.reduce !== undefined) {
+    let reduced: ViewProjection;
+    try {
+      reduced = normalizeViewProjection(
+        input.view.reduce({
+          projection,
+          source: input.source,
+          budget: input.budget,
+          renderer: input.renderer,
+          meaning: input.meaning,
+        }),
+      );
+    } catch (error) {
+      throw failure("VIEW_PROJECTION_FAILED", { view: identityOf(input.view) }, error);
+    }
+    if (!sameSemanticValue(reduced.value, projection.value) && preservesRequiredMeaning(reduced.value, normalizedMeaning)) {
+      reduced = markReducedProjection(reduced, {
+        kind: "view-reduction",
+      });
+      const reducedLoss = mergeLoss(input.meaning, reduced.loss, undefined);
+      const reducedRendered = renderProjection(
+        input.renderer,
+        input.source,
+        input.budget,
+        input.adapter,
+        input.contract,
+        input.view,
+        input.meaning,
+        reduced,
+        reducedLoss,
+      );
+      if (reducedRendered.bytes.byteLength < currentBytes) {
+        projection = reduced;
+        rendered = reducedRendered;
+        currentBytes = rendered.bytes.byteLength;
+      }
+      if (currentBytes <= input.budget.maxBytes) {
+        return { projection, rendered };
+      }
+    }
+  }
+
+  const operations = reductionOperations(projection.value, normalizedMeaning);
+  for (const operation of operations) {
+    const value = operation.apply(projection.value);
+    if (sameSemanticValue(value, projection.value) || !preservesRequiredMeaning(value, normalizedMeaning)) {
+      continue;
+    }
+    const candidate = markReducedProjection({ ...projection, value }, operation);
+    const candidateLoss = mergeLoss(input.meaning, candidate.loss, undefined);
+    const candidateRendered = renderProjection(
+      input.renderer,
+      input.source,
+      input.budget,
+      input.adapter,
+      input.contract,
+      input.view,
+      input.meaning,
+      candidate,
+      candidateLoss,
+    );
+    if (candidateRendered.bytes.byteLength < currentBytes) {
+      projection = candidate;
+      rendered = candidateRendered;
+      currentBytes = rendered.bytes.byteLength;
+    }
+    if (currentBytes <= input.budget.maxBytes) {
+      return { projection, rendered };
+    }
+  }
+
+  return { projection, rendered };
+}
+
+function fittedRequiredMinimum(
+  source: ProjectionSource,
+  budget: Budget,
+  adapter: Adapter,
+  contract: SemanticContract,
+  view: View,
+  renderer: Renderer,
+  meaning: ViewMeaning,
+  projection: ViewProjection,
+): number {
+  let value = projection.value;
+  const normalizedMeaning = freezeMeaning(meaning);
+  for (const operation of reductionOperations(value, normalizedMeaning)) {
+    value = operation.apply(value);
+  }
+  const minimumProjection = markReducedProjection({ ...projection, value }, { kind: "required-minimum" });
+  try {
+    const rendered = renderProjection(
+      renderer,
+      source,
+      budget,
+      adapter,
+      contract,
+      view,
+      meaning,
+      minimumProjection,
+      mergeLoss(meaning, minimumProjection.loss, undefined),
+    );
+    return rendered.bytes.byteLength;
+  } catch {
+    return budget.maxBytes + 1;
+  }
+}
+
+function markReducedProjection(
+  projection: ViewProjection,
+  operation: Pick<ReductionOperation, "kind" | "path" | "count">,
+): ViewProjection {
+  const previous: LossMetadata =
+    projection.loss === undefined ? { state: "none", discarded: [] } : normalizeLoss(projection.loss);
+  const reduction: LossReduction = {
+    kind: operation.kind,
+    ...(operation.path === undefined ? {} : { path: operation.path }),
+    ...(operation.count === undefined ? {} : { count: operation.count }),
+  };
+  return {
+    ...projection,
+    completeness: "partial",
+    loss: {
+      state: previous.state === "total" ? "total" : "partial",
+      discarded: previous.discarded,
+      reductions: [...(previous.reductions ?? []), reduction],
+      ...(previous.discardedCounts === undefined ? {} : { discardedCounts: previous.discardedCounts }),
+    },
+  };
+}
+
+function reductionOperations(value: unknown, meaning: NormalizedViewMeaning): readonly ReductionOperation[] {
+  const operations: ReductionOperation[] = [];
+  const seen = new Set<string>();
+  const add = (operation: ReductionOperation): void => {
+    const key = `${operation.kind}:${operation.path ?? ""}:${operation.count ?? ""}:${operation.operationKey ?? ""}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      operations.push(operation);
+    }
+  };
+
+  const representationReductions = [...(meaning.reductions ?? meaning.allowedReductions ?? [])]
+    .map((reduction, index) => ({ reduction, index }))
+    .sort((left, right) => {
+      const leftPriority =
+        typeof left.reduction === "object" && left.reduction.priority !== undefined ? left.reduction.priority : 0;
+      const rightPriority =
+        typeof right.reduction === "object" && right.reduction.priority !== undefined ? right.reduction.priority : 0;
+      return leftPriority - rightPriority || left.index - right.index;
+    });
+  for (const { reduction } of representationReductions) {
+    const normalized = typeof reduction === "string" ? { kind: reduction } : reduction;
+    const kind = canonicalReductionKind(normalized.kind);
+    if (kind === undefined) {
+      continue;
+    }
+    add({
+      kind,
+      ...(normalized.path === undefined ? {} : { path: normalized.path }),
+      apply: (current) => applyRepresentationReduction(current, kind, normalized.path),
+    });
+  }
+
+  const priorities = meaning.priorities;
+  const requiredPaths = new Set(meaning.required);
+  for (const priority of priorities) {
+    if (priority.required) {
+      requiredPaths.add(priority.path);
+    }
+  }
+  const prioritized = priorities
+    .map((priority, index) => ({ priority, index }))
+    .filter(({ priority }) => !priority.required && !isProtectedPath(priority.path, requiredPaths))
+    .sort((left, right) => right.priority.priority - left.priority.priority || right.index - left.index);
+  for (const { priority } of prioritized) {
+    addPathOperations(value, priority.path, "semantic-priority", add);
+  }
+
+  const explicitOptional = [...(meaning.optional ?? [])];
+  for (let index = explicitOptional.length - 1; index >= 0; index -= 1) {
+    const path = explicitOptional[index];
+    if (!isProtectedPath(path, requiredPaths)) {
+      addPathOperations(value, path, "optional-field", add);
+    }
+  }
+
+  const preserved = [...meaning.preserved];
+  for (let index = preserved.length - 1; index >= 0; index -= 1) {
+    const path = preserved[index];
+    if (!isProtectedPath(path, requiredPaths)) {
+      addPathOperations(value, path, "preserved-field", add);
+    }
+  }
+  return operations;
+}
+
+function addPathOperations(
+  value: unknown,
+  path: string,
+  kind: string,
+  add: (operation: ReductionOperation) => void,
+): void {
+  const current = getPath(value, path);
+  if (Array.isArray(current)) {
+    const length = current.length;
+    if (length > 10) {
+      const steps = [length >> 1, length >> 2, length >> 3];
+      for (const step of steps) {
+        if (step > 0) {
+          for (let count = step; count < length; count += step) {
+            const startIndex = length - count;
+            add({
+              kind: "collection-item-omission",
+              path,
+              count,
+              operationKey: `${path}[${startIndex}:${length}]`,
+              apply: (candidate) => removePathRange(candidate, path, startIndex, length),
+            });
+          }
+        }
+      }
+    }
+    for (let index = current.length - 1; index >= 0; index -= 1) {
+      add({
+        kind: "collection-item-omission",
+        path,
+        count: 1,
+        operationKey: `${path}[${index}]`,
+        apply: (candidate) => removePathIndex(candidate, path, index),
+      });
+    }
+    return;
+  }
+  if (current !== undefined) {
+    add({
+      kind,
+      path,
+      count: 1,
+      apply: (candidate) => removePath(candidate, path),
+    });
+  }
+}
+
+function isProtectedPath(path: string, required: ReadonlySet<string>): boolean {
+  for (const requiredPath of required) {
+    if (requiredPath === path || requiredPath.startsWith(`${path}.`) || requiredPath.startsWith(`${path}[`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function canonicalReductionKind(kind: string): SemanticReductionKind | undefined {
+  const aliases: Record<string, SemanticReductionKind> = {
+    ansi: "ansi-removal",
+    "strip-ansi": "ansi-removal",
+    "ansi-removal": "ansi-removal",
+    "path-dedup": "path-deduplication",
+    "path-deduplication": "path-deduplication",
+    "repeated-message-fold": "repeated-message-folding",
+    "repeated-message-folding": "repeated-message-folding",
+    "stack-collapse": "stack-frame-collapse",
+    "stack-frame-collapse": "stack-frame-collapse",
+  };
+  return aliases[kind];
+}
+
+function applyRepresentationReduction(value: unknown, kind: SemanticReductionKind, path: string | undefined): unknown {
+  const transform = (current: unknown): unknown => {
+    if (kind === "ansi-removal") {
+      return transformDeep(current, (item) => (typeof item === "string" ? stripAnsi(item) : item));
+    }
+    if (!Array.isArray(current)) {
+      return current;
+    }
+    if (kind === "path-deduplication") {
+      return deduplicatePaths(current);
+    }
+    if (kind === "repeated-message-folding") {
+      return foldRepeatedMessages(current);
+    }
+    return collapseStackFrames(current);
+  };
+  return path === undefined ? transform(value) : updatePath(value, path, transform);
+}
+
+function transformDeep(value: unknown, transform: (value: unknown) => unknown): unknown {
+  const transformed = transform(value);
+  if (transformed !== value) {
+    return transformed;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => transformDeep(item, transform));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, transformDeep(item, transform)]));
+  }
+  return value;
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function deduplicatePaths(values: readonly unknown[]): readonly unknown[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const path =
+      isRecord(value) && typeof value.path === "string" ? value.path : typeof value === "string" ? value : undefined;
+    if (path === undefined) {
+      return true;
+    }
+    if (seen.has(path)) {
+      return false;
+    }
+    seen.add(path);
+    return true;
+  });
+}
+
+function foldRepeatedMessages(values: readonly unknown[]): readonly unknown[] {
+  const result: unknown[] = [];
+  for (const value of values) {
+    const previous = result[result.length - 1];
+    if (isRecord(previous) && isRecord(value) && previous.message === value.message) {
+      const count = typeof previous.count === "number" ? previous.count : 1;
+      result[result.length - 1] = { ...previous, count: count + 1 };
+    } else {
+      result.push(value);
+    }
+  }
+  return result;
+}
+
+function collapseStackFrames(values: readonly unknown[]): readonly unknown[] {
+  const result: unknown[] = [];
+  for (const value of values) {
+    if (result.length > 0 && sameSemanticValue(result[result.length - 1], value)) {
+      continue;
+    }
+    result.push(value);
+  }
+  return result;
+}
+
+function sameSemanticValue(left: unknown, right: unknown): boolean {
+  return canonicalize(left) === canonicalize(right);
+}
+
+function pathSegments(path: string): readonly (string | number)[] {
+  return path
+    .replace(/\[([0-9]+)\]/g, ".$1")
+    .split(".")
+    .filter((segment) => segment.length > 0)
+    .map((segment) => (/^[0-9]+$/.test(segment) ? Number(segment) : segment));
+}
+
+function getPath(value: unknown, path: string): unknown {
+  let current = value;
+  for (const segment of pathSegments(path)) {
+    if (Array.isArray(current) && typeof segment === "number") {
+      current = current[segment];
+    } else if (isRecord(current) && typeof segment === "string") {
+      current = current[segment];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function preservesRequiredMeaning(value: unknown, meaning: NormalizedViewMeaning): boolean {
+  const required = new Set(meaning.required);
+  for (const priority of meaning.priorities) {
+    if (priority.required) {
+      required.add(priority.path);
+    }
+  }
+  return [...required].every((path) => hasPath(value, path));
+}
+
+function hasPath(value: unknown, path: string): boolean {
+  let current = value;
+  for (const segment of pathSegments(path)) {
+    if (Array.isArray(current) && typeof segment === "number") {
+      if (segment < 0 || segment >= current.length) {
+        return false;
+      }
+      current = current[segment];
+    } else if (
+      isRecord(current) &&
+      typeof segment === "string" &&
+      Object.prototype.hasOwnProperty.call(current, segment)
+    ) {
+      current = current[segment];
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+function removePath(value: unknown, path: string): unknown {
+  return updatePath(value, path, () => undefined, true);
+}
+
+function removePathIndex(value: unknown, path: string, index: number): unknown {
+  const current = getPath(value, path);
+  if (!Array.isArray(current) || index < 0 || index >= current.length) {
+    return value;
+  }
+  return updatePath(value, path, (item) =>
+    Array.isArray(item) ? item.filter((_, itemIndex) => itemIndex !== index) : item,
+  );
+}
+
+function removePathRange(value: unknown, path: string, startIndex: number, endIndex: number): unknown {
+  const current = getPath(value, path);
+  if (!Array.isArray(current) || startIndex < 0 || startIndex >= current.length) {
+    return value;
+  }
+  return updatePath(value, path, (item) =>
+    Array.isArray(item) ? item.filter((_, itemIndex) => itemIndex < startIndex || itemIndex >= endIndex) : item,
+  );
+}
+
+function updatePath(value: unknown, path: string, transform: (value: unknown) => unknown, remove = false): unknown {
+  return updatePathSegments(value, pathSegments(path), transform, remove);
+}
+
+function updatePathSegments(
+  value: unknown,
+  segments: readonly (string | number)[],
+  transform: (value: unknown) => unknown,
+  remove = false,
+): unknown {
+  if (segments.length === 0) {
+    return transform(value);
+  }
+  const clone = cloneContainer(value);
+  if (clone === undefined) {
+    return value;
+  }
+  const [head, ...tail] = segments;
+  const child = getSegment(clone, head);
+  if (tail.length === 0) {
+    const next = remove ? undefined : transform(child);
+    if (remove && Array.isArray(clone) && typeof head === "number") {
+      clone.splice(head, 1);
+    } else if (next === undefined) {
+      delete clone[head as keyof typeof clone];
+    } else {
+      clone[head as keyof typeof clone] = next as never;
+    }
+    return clone;
+  }
+  const next = updatePathSegments(child, tail, transform, remove);
+  if (next === child) {
+    return value;
+  }
+  clone[head as keyof typeof clone] = next as never;
+  return clone;
+}
+
+function cloneContainer(value: unknown): Record<string, unknown> | unknown[] | undefined {
+  return Array.isArray(value) ? [...value] : isRecord(value) ? { ...value } : undefined;
+}
+
+function getSegment(value: Record<string, unknown> | unknown[], segment: string | number): unknown {
+  if (Array.isArray(value)) {
+    return typeof segment === "number" ? value[segment] : undefined;
+  }
+  return value[String(segment)];
 }
 
 function validateRequest(request: ProjectionRequest): void {
@@ -831,7 +1467,46 @@ function normalizeLoss(value: unknown): LossMetadata {
   if (!Array.isArray(discarded) || discarded.some((item) => typeof item !== "string")) {
     throw new Error("loss.discarded must be an array of strings");
   }
-  return { state: value.state, discarded };
+  const reductions = value.reductions ?? [];
+  if (!Array.isArray(reductions)) {
+    throw new Error("loss.reductions must be an array");
+  }
+  const normalizedReductions = reductions.map(normalizeLossReduction);
+  const discardedCounts = value.discardedCounts;
+  if (
+    discardedCounts !== undefined &&
+    (!isRecord(discardedCounts) ||
+      Object.values(discardedCounts).some((count) => typeof count !== "number" || count < 0))
+  ) {
+    throw new Error("loss.discardedCounts must be a map of non-negative numbers");
+  }
+  return {
+    state: normalizedReductions.length > 0 && value.state === "none" ? "partial" : value.state,
+    discarded,
+    ...(normalizedReductions.length === 0 ? {} : { reductions: normalizedReductions }),
+    ...(discardedCounts === undefined ? {} : { discardedCounts: discardedCounts as Readonly<Record<string, number>> }),
+  };
+}
+
+function normalizeLossReduction(value: unknown): LossReduction {
+  if (!isRecord(value) || typeof value.kind !== "string" || value.kind === "") {
+    throw new Error("loss.reductions entries require kind");
+  }
+  if (value.path !== undefined && typeof value.path !== "string") {
+    throw new Error("loss.reductions.path must be a string");
+  }
+  if (value.count !== undefined && (typeof value.count !== "number" || value.count < 0)) {
+    throw new Error("loss.reductions.count must be a non-negative number");
+  }
+  if (value.details !== undefined && !isRecord(value.details)) {
+    throw new Error("loss.reductions.details must be an object");
+  }
+  return {
+    kind: value.kind,
+    ...(value.path === undefined ? {} : { path: value.path }),
+    ...(value.count === undefined ? {} : { count: value.count }),
+    ...(value.details === undefined ? {} : { details: value.details as Readonly<Record<string, unknown>> }),
+  };
 }
 
 function mergeLoss(
@@ -851,8 +1526,38 @@ function mergeLoss(
     (current, candidate) => (lossRank(candidate.state) > lossRank(current) ? candidate.state : current),
     "none",
   );
-  const discarded = uniqueStrings(candidates.flatMap((candidate) => candidate.discarded));
-  return { state, discarded };
+  const reductions = uniqueReductions(candidates.flatMap((candidate) => candidate.reductions ?? []));
+  const pathRemovalKinds = new Set([
+    "semantic-priority",
+    "optional-field",
+    "preserved-field",
+    "view-reduction",
+    "required-minimum",
+  ]);
+  const discarded = uniqueStrings([
+    ...candidates.flatMap((candidate) => candidate.discarded),
+    ...reductions.flatMap((reduction) =>
+      reduction.path === undefined || !pathRemovalKinds.has(reduction.kind) ? [] : [reduction.path],
+    ),
+  ]);
+  const discardedCounts: Record<string, number> = {};
+  for (const candidate of candidates) {
+    for (const [path, count] of Object.entries(candidate.discardedCounts ?? {})) {
+      discardedCounts[path] = (discardedCounts[path] ?? 0) + count;
+    }
+  }
+  for (const reduction of reductions) {
+    if (reduction.path !== undefined && reduction.count !== undefined) {
+      discardedCounts[reduction.path] = (discardedCounts[reduction.path] ?? 0) + reduction.count;
+    }
+  }
+  const finalState: LossState = reductions.length > 0 && state === "none" ? "partial" : state;
+  return {
+    state: finalState,
+    discarded,
+    ...(reductions.length === 0 ? {} : { reductions }),
+    ...(Object.keys(discardedCounts).length === 0 ? {} : { discardedCounts }),
+  };
 }
 
 function lossRank(state: LossState): number {
@@ -861,6 +1566,27 @@ function lossRank(state: LossState): number {
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+function uniqueReductions(values: readonly LossReduction[]): readonly LossReduction[] {
+  const indexes = new Map<string, number>();
+  const result: LossReduction[] = [];
+  for (const value of values) {
+    const key = canonicalize({ kind: value.kind, path: value.path, details: value.details });
+    const existingIndex = indexes.get(key);
+    if (existingIndex === undefined) {
+      indexes.set(key, result.length);
+      result.push(value);
+    } else {
+      const existing = result[existingIndex];
+      const count = (existing.count ?? 0) + (value.count ?? 0);
+      result[existingIndex] = {
+        ...existing,
+        ...(count === 0 ? {} : { count }),
+      };
+    }
+  }
+  return result;
 }
 
 function sourceMetadata(source: ProjectionSource): SourceProvenance | undefined {
@@ -946,6 +1672,9 @@ function canonicalize(value: unknown): string {
   if (value === null) {
     return "null";
   }
+  if (value === undefined) {
+    return "null";
+  }
   if (typeof value === "string" || typeof value === "boolean") {
     return JSON.stringify(value);
   }
@@ -969,11 +1698,67 @@ function canonicalize(value: unknown): string {
   return JSON.stringify(String(value));
 }
 
+/** Canonical machine-readable JSON used by the standard renderer. */
+export function stableJsonStringify(value: unknown): string {
+  return canonicalize(value);
+}
+
+/** Deterministic compact text representation for agent-facing output. */
+export function compactTextStringify(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (value instanceof Uint8Array) {
+    return new TextDecoder().decode(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(compactTextStringify).join("\n");
+  }
+  if (isRecord(value)) {
+    return Object.keys(value)
+      .sort(compareStrings)
+      .map((key) => `${key}=${compactTextStringify(value[key])}`)
+      .join(" ");
+  }
+  return String(value);
+}
+
+export const jsonRenderer: Renderer = Object.freeze({
+  id: "json",
+  version: "1.0.0",
+  format: "application/json",
+  render: (projection: unknown) => stableJsonStringify(projection),
+});
+
+export const machineJsonRenderer = jsonRenderer;
+export const stableMachineJsonRenderer = jsonRenderer;
+
+export const textRenderer: Renderer = Object.freeze({
+  id: "text",
+  version: "1.0.0",
+  format: "text/plain",
+  render: (projection: unknown) => compactTextStringify(projection),
+});
+
+export const compactTextRenderer = textRenderer;
+export const compactAgentTextRenderer = textRenderer;
+export const agentTextRenderer = textRenderer;
+
+function standardRenderers(): readonly Renderer[] {
+  return [jsonRenderer, textRenderer];
+}
+
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function freezeMeaning(meaning: ViewMeaning): ViewMeaning {
+function freezeMeaning(meaning: ViewMeaning): NormalizedViewMeaning {
   const fields: Array<keyof ViewMeaning> = ["required", "preserved", "discarded"];
   for (const field of fields) {
     if (!Array.isArray(meaning[field]) || meaning[field].some((item) => typeof item !== "string")) {
@@ -983,10 +1768,147 @@ function freezeMeaning(meaning: ViewMeaning): ViewMeaning {
       });
     }
   }
+  if (
+    meaning.optional !== undefined &&
+    (!Array.isArray(meaning.optional) || meaning.optional.some((item) => typeof item !== "string"))
+  ) {
+    throw new SuzukuriError("INVALID_COMPONENT", undefined, {
+      componentType: "view",
+      field: "optional",
+    });
+  }
+  const required = [...meaning.required];
+  const preserved = [...meaning.preserved];
+  const discarded = [...meaning.discarded];
+  const optional = [...(meaning.optional ?? [])];
+  const priorities = normalizePriorities(meaning.priorities ?? meaning.priority ?? [], required);
+  const reductions = normalizeReductions(meaning.reductions ?? meaning.allowedReductions ?? []);
+  const frozenPriorities = Object.freeze(priorities.map((priority) => Object.freeze(priority)));
+  const frozenReductions = Object.freeze(reductions.map((reduction) => Object.freeze(reduction)));
   return Object.freeze({
-    required: Object.freeze([...meaning.required]),
-    preserved: Object.freeze([...meaning.preserved]),
-    discarded: Object.freeze([...meaning.discarded]),
+    required: Object.freeze(required),
+    preserved: Object.freeze(preserved),
+    discarded: Object.freeze(discarded),
+    priorities: frozenPriorities,
+    priority: frozenPriorities,
+    optional: Object.freeze(optional),
+    reductions: frozenReductions,
+    allowedReductions: frozenReductions,
+  });
+}
+
+interface NormalizedPriority {
+  readonly path: string;
+  readonly priority: number;
+  readonly required: boolean;
+}
+
+interface NormalizedReduction {
+  readonly kind: string;
+  readonly path?: string;
+  readonly priority?: number;
+}
+
+interface NormalizedViewMeaning {
+  readonly required: readonly string[];
+  readonly preserved: readonly string[];
+  readonly discarded: readonly string[];
+  readonly priorities: readonly NormalizedPriority[];
+  readonly priority: readonly NormalizedPriority[];
+  readonly optional: readonly string[];
+  readonly reductions: readonly NormalizedReduction[];
+  readonly allowedReductions: readonly NormalizedReduction[];
+}
+
+function normalizePriorities(
+  value: ViewMeaning["priorities"],
+  required: readonly string[],
+): readonly NormalizedPriority[] {
+  const declarations: readonly SemanticPriorityDeclaration[] = Array.isArray(value)
+    ? value
+    : value !== undefined && value !== null && typeof value === "object"
+      ? Object.keys(value).map((path) => ({ path, priority: (value as Record<string, number>)[path] }))
+      : [];
+  const requiredPaths = new Set(required);
+  const seen = new Set<string>();
+  const normalized: NormalizedPriority[] = [];
+  declarations.forEach((declaration, index) => {
+    const candidate = typeof declaration === "string" ? { path: declaration } : declaration;
+    if (candidate === null || typeof candidate !== "object") {
+      throw new SuzukuriError("INVALID_COMPONENT", undefined, {
+        componentType: "view",
+        field: "priorities",
+      });
+    }
+    const path = [candidate.path, candidate.key, candidate.field, candidate.name].find(
+      (item): item is string => typeof item === "string" && item.length > 0,
+    );
+    if (path === undefined) {
+      throw new SuzukuriError("INVALID_COMPONENT", undefined, {
+        componentType: "view",
+        field: "priorities",
+      });
+    }
+    if (seen.has(path)) {
+      return;
+    }
+    const declaredPriority = candidate.priority ?? candidate.rank ?? candidate.order ?? index;
+    if (typeof declaredPriority !== "number" || !Number.isFinite(declaredPriority)) {
+      throw new SuzukuriError("INVALID_COMPONENT", undefined, {
+        componentType: "view",
+        field: "priorities",
+        path,
+      });
+    }
+    seen.add(path);
+    normalized.push({
+      path,
+      priority: declaredPriority,
+      required: candidate.required ?? requiredPaths.has(path),
+    });
+  });
+  return normalized;
+}
+
+function normalizeReductions(
+  value: readonly SemanticReductionDeclaration[] | undefined,
+): readonly NormalizedReduction[] {
+  if (value === undefined) {
+    return [];
+  }
+  return value.map((declaration) => {
+    const candidate = typeof declaration === "string" ? { kind: declaration } : declaration;
+    if (
+      candidate === null ||
+      typeof candidate !== "object" ||
+      typeof candidate.kind !== "string" ||
+      candidate.kind === ""
+    ) {
+      throw new SuzukuriError("INVALID_COMPONENT", undefined, {
+        componentType: "view",
+        field: "reductions",
+      });
+    }
+    if (candidate.path !== undefined && typeof candidate.path !== "string") {
+      throw new SuzukuriError("INVALID_COMPONENT", undefined, {
+        componentType: "view",
+        field: "reductions.path",
+      });
+    }
+    if (
+      candidate.priority !== undefined &&
+      (typeof candidate.priority !== "number" || !Number.isFinite(candidate.priority))
+    ) {
+      throw new SuzukuriError("INVALID_COMPONENT", undefined, {
+        componentType: "view",
+        field: "reductions.priority",
+      });
+    }
+    return {
+      kind: candidate.kind,
+      ...(candidate.path === undefined ? {} : { path: candidate.path }),
+      ...(candidate.priority === undefined ? {} : { priority: candidate.priority }),
+    };
   });
 }
 
