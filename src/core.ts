@@ -136,7 +136,7 @@ export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly allowedReductions?: readonly SemanticReductionDeclaration[];
   project(input: ViewProjectInput): TProjection | ViewProjection<TProjection>;
   /** Optional view-owned reduction hook for typed projections with custom semantics. */
-  readonly reduce?: (...args: never[]) => unknown;
+  readonly reduce?: (input: ViewReduceInput<TProjection>) => TProjection | ViewProjection<TProjection>;
 }
 
 export type BudgetUnit = "utf8-bytes";
@@ -488,8 +488,12 @@ export class ProjectionCore {
     this.adapters.registerMany(options.adapters ?? []);
     this.semanticContracts.registerMany(options.semanticContracts ?? options.contracts ?? []);
     this.views.registerMany(options.views ?? []);
-    this.renderers.registerMany(options.renderers ?? []);
-    if (options.renderers === undefined) {
+    const renderers = options.renderers !== undefined ? [...options.renderers] : undefined;
+    const shouldLoadStandardRenderers = renderers === undefined || renderers.length === 0;
+    if (renderers !== undefined) {
+      this.renderers.registerMany(renderers);
+    }
+    if (shouldLoadStandardRenderers) {
       for (const renderer of standardRenderers()) {
         if (!this.renderers.has(renderer.id)) {
           this.renderers.register(renderer);
@@ -784,12 +788,13 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
   let projection = input.projection;
   let rendered = input.initial;
   let currentBytes = rendered.bytes.byteLength;
+  const normalizedMeaning = freezeMeaning(input.meaning);
 
   if (input.view.reduce !== undefined) {
     let reduced: ViewProjection;
     try {
       reduced = normalizeViewProjection(
-        (input.view.reduce as (input: ViewReduceInput) => unknown)({
+        input.view.reduce({
           projection,
           source: input.source,
           budget: input.budget,
@@ -800,7 +805,7 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
     } catch (error) {
       throw failure("VIEW_PROJECTION_FAILED", { view: identityOf(input.view) }, error);
     }
-    if (!sameSemanticValue(reduced.value, projection.value) && preservesRequiredMeaning(reduced.value, input.meaning)) {
+    if (!sameSemanticValue(reduced.value, projection.value) && preservesRequiredMeaning(reduced.value, normalizedMeaning)) {
       reduced = markReducedProjection(reduced, {
         kind: "view-reduction",
       });
@@ -827,10 +832,10 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
     }
   }
 
-  const operations = reductionOperations(projection.value, input.meaning);
+  const operations = reductionOperations(projection.value, normalizedMeaning);
   for (const operation of operations) {
     const value = operation.apply(projection.value);
-    if (sameSemanticValue(value, projection.value) || !preservesRequiredMeaning(value, input.meaning)) {
+    if (sameSemanticValue(value, projection.value) || !preservesRequiredMeaning(value, normalizedMeaning)) {
       continue;
     }
     const candidate = markReducedProjection({ ...projection, value }, operation);
@@ -870,7 +875,8 @@ function fittedRequiredMinimum(
   projection: ViewProjection,
 ): number {
   let value = projection.value;
-  for (const operation of reductionOperations(value, meaning)) {
+  const normalizedMeaning = freezeMeaning(meaning);
+  for (const operation of reductionOperations(value, normalizedMeaning)) {
     value = operation.apply(value);
   }
   const minimumProjection = markReducedProjection({ ...projection, value }, { kind: "required-minimum" });
@@ -888,7 +894,7 @@ function fittedRequiredMinimum(
     );
     return rendered.bytes.byteLength;
   } catch {
-    return new TextEncoder().encode(String(projection.value)).byteLength;
+    return budget.maxBytes + 1;
   }
 }
 
@@ -909,17 +915,13 @@ function markReducedProjection(
     loss: {
       state: previous.state === "total" ? "total" : "partial",
       discarded: previous.discarded,
-      ...(previous.reductions === undefined && previous.discardedCounts === undefined
-        ? { reductions: [reduction] }
-        : {
-            reductions: [...(previous.reductions ?? []), reduction],
-            ...(previous.discardedCounts === undefined ? {} : { discardedCounts: previous.discardedCounts }),
-          }),
+      reductions: [...(previous.reductions ?? []), reduction],
+      ...(previous.discardedCounts === undefined ? {} : { discardedCounts: previous.discardedCounts }),
     },
   };
 }
 
-function reductionOperations(value: unknown, meaning: ViewMeaning): readonly ReductionOperation[] {
+function reductionOperations(value: unknown, meaning: NormalizedViewMeaning): readonly ReductionOperation[] {
   const operations: ReductionOperation[] = [];
   const seen = new Set<string>();
   const add = (operation: ReductionOperation): void => {
@@ -952,7 +954,7 @@ function reductionOperations(value: unknown, meaning: ViewMeaning): readonly Red
     });
   }
 
-  const priorities = Array.isArray(meaning.priorities) ? meaning.priorities : [];
+  const priorities = meaning.priorities;
   const requiredPaths = new Set(meaning.required);
   for (const priority of priorities) {
     if (priority.required) {
@@ -962,7 +964,7 @@ function reductionOperations(value: unknown, meaning: ViewMeaning): readonly Red
   const prioritized = priorities
     .map((priority, index) => ({ priority, index }))
     .filter(({ priority }) => !priority.required && !isProtectedPath(priority.path, requiredPaths))
-    .sort((left, right) => right.priority - left.priority || right.index - left.index);
+    .sort((left, right) => right.priority.priority - left.priority.priority || right.index - left.index);
   for (const { priority } of prioritized) {
     addPathOperations(value, priority.path, "semantic-priority", add);
   }
@@ -993,6 +995,24 @@ function addPathOperations(
 ): void {
   const current = getPath(value, path);
   if (Array.isArray(current)) {
+    const length = current.length;
+    if (length > 10) {
+      const steps = [length >> 1, length >> 2, length >> 3];
+      for (const step of steps) {
+        if (step > 0) {
+          for (let count = step; count < length; count += step) {
+            const startIndex = length - count;
+            add({
+              kind: "collection-item-omission",
+              path,
+              count,
+              operationKey: `${path}[${startIndex}:${length}]`,
+              apply: (candidate) => removePathRange(candidate, path, startIndex, length),
+            });
+          }
+        }
+      }
+    }
     for (let index = current.length - 1; index >= 0; index -= 1) {
       add({
         kind: "collection-item-omission",
@@ -1142,13 +1162,11 @@ function getPath(value: unknown, path: string): unknown {
   return current;
 }
 
-function preservesRequiredMeaning(value: unknown, meaning: ViewMeaning): boolean {
+function preservesRequiredMeaning(value: unknown, meaning: NormalizedViewMeaning): boolean {
   const required = new Set(meaning.required);
-  if (Array.isArray(meaning.priorities)) {
-    for (const priority of meaning.priorities) {
-      if (priority.required) {
-        required.add(priority.path);
-      }
+  for (const priority of meaning.priorities) {
+    if (priority.required) {
+      required.add(priority.path);
     }
   }
   return [...required].every((path) => hasPath(value, path));
@@ -1189,8 +1207,26 @@ function removePathIndex(value: unknown, path: string, index: number): unknown {
   );
 }
 
+function removePathRange(value: unknown, path: string, startIndex: number, endIndex: number): unknown {
+  const current = getPath(value, path);
+  if (!Array.isArray(current) || startIndex < 0 || startIndex >= current.length) {
+    return value;
+  }
+  return updatePath(value, path, (item) =>
+    Array.isArray(item) ? item.filter((_, itemIndex) => itemIndex < startIndex || itemIndex >= endIndex) : item,
+  );
+}
+
 function updatePath(value: unknown, path: string, transform: (value: unknown) => unknown, remove = false): unknown {
-  const segments = pathSegments(path);
+  return updatePathSegments(value, pathSegments(path), transform, remove);
+}
+
+function updatePathSegments(
+  value: unknown,
+  segments: readonly (string | number)[],
+  transform: (value: unknown) => unknown,
+  remove = false,
+): unknown {
   if (segments.length === 0) {
     return transform(value);
   }
@@ -1211,7 +1247,7 @@ function updatePath(value: unknown, path: string, transform: (value: unknown) =>
     }
     return clone;
   }
-  const next = updatePath(child, tail.map(String).join("."), transform, remove);
+  const next = updatePathSegments(child, tail, transform, remove);
   if (next === child) {
     return value;
   }
@@ -1462,6 +1498,9 @@ function normalizeLossReduction(value: unknown): LossReduction {
   if (value.count !== undefined && (typeof value.count !== "number" || value.count < 0)) {
     throw new Error("loss.reductions.count must be a non-negative number");
   }
+  if (value.details !== undefined && !isRecord(value.details)) {
+    throw new Error("loss.reductions.details must be an object");
+  }
   return {
     kind: value.kind,
     ...(value.path === undefined ? {} : { path: value.path }),
@@ -1488,9 +1527,18 @@ function mergeLoss(
     "none",
   );
   const reductions = uniqueReductions(candidates.flatMap((candidate) => candidate.reductions ?? []));
+  const pathRemovalKinds = new Set([
+    "semantic-priority",
+    "optional-field",
+    "preserved-field",
+    "view-reduction",
+    "required-minimum",
+  ]);
   const discarded = uniqueStrings([
     ...candidates.flatMap((candidate) => candidate.discarded),
-    ...reductions.flatMap((reduction) => (reduction.path === undefined ? [] : [reduction.path])),
+    ...reductions.flatMap((reduction) =>
+      reduction.path === undefined || !pathRemovalKinds.has(reduction.kind) ? [] : [reduction.path],
+    ),
   ]);
   const discardedCounts: Record<string, number> = {};
   for (const candidate of candidates) {
@@ -1710,7 +1758,7 @@ function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function freezeMeaning(meaning: ViewMeaning): ViewMeaning {
+function freezeMeaning(meaning: ViewMeaning): NormalizedViewMeaning {
   const fields: Array<keyof ViewMeaning> = ["required", "preserved", "discarded"];
   for (const field of fields) {
     if (!Array.isArray(meaning[field]) || meaning[field].some((item) => typeof item !== "string")) {
@@ -1759,6 +1807,17 @@ interface NormalizedReduction {
   readonly kind: string;
   readonly path?: string;
   readonly priority?: number;
+}
+
+interface NormalizedViewMeaning {
+  readonly required: readonly string[];
+  readonly preserved: readonly string[];
+  readonly discarded: readonly string[];
+  readonly priorities: readonly NormalizedPriority[];
+  readonly priority: readonly NormalizedPriority[];
+  readonly optional: readonly string[];
+  readonly reductions: readonly NormalizedReduction[];
+  readonly allowedReductions: readonly NormalizedReduction[];
 }
 
 function normalizePriorities(

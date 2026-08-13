@@ -270,19 +270,75 @@ test("standard renderers are deterministic and budget reduction follows semantic
     views: [budgetView],
   });
   const retained = stableJsonStringify({ items: ["a", "b"], high: "重要", required: "必須" });
-  const result = core.project({
+  const requestJson = {
     source: "fixture",
     adapter: "text",
     view: "budget-view",
     budget: new TextEncoder().encode(retained).byteLength,
     renderer: "json",
-  });
+  } as const;
+  const result = core.project(requestJson);
+  const result2 = core.project(requestJson);
 
   assert.equal(result.output, retained);
   assert.equal(result.completeness, "partial");
   assert.equal(result.loss.state, "partial");
   assert.deepEqual(result.loss.reductions, [{ kind: "semantic-priority", path: "low", count: 1 }]);
   assert.equal(new TextEncoder().encode(String(result.output)).byteLength, result.byteLength);
+
+  assert.equal(result2.output, result.output);
+  assert.equal(result2.projectionDigest, result.projectionDigest);
+  assert.deepEqual(result2.loss, result.loss);
+
+  const tooSmallRequest = { ...requestJson, budget: 1 };
+  assert.throws(() => core.project(tooSmallRequest), (err: unknown) => {
+    const err1 = err as SuzukuriError;
+    assert.throws(() => core.project(tooSmallRequest), (err2: unknown) => {
+      const err2Typed = err2 as SuzukuriError;
+      assert.equal(err1.code, "BUDGET_TOO_SMALL");
+      assert.equal(err2Typed.code, err1.code);
+      assert.deepEqual(err2Typed.details, err1.details);
+      return true;
+    });
+    return true;
+  });
+
+  const textRequest = { ...requestJson, renderer: "text" };
+  const textResult1 = core.project(textRequest);
+  const textResult2 = core.project(textRequest);
+  assert.equal(textResult1.output, textResult2.output);
+  assert.equal(textResult1.projectionDigest, textResult2.projectionDigest);
+  assert.deepEqual(textResult1.loss, textResult2.loss);
+});
+
+test("semantic priority processes higher priority paths first regardless of declaration order", () => {
+  const priorityView: View<{ low: string; high: string; required: string }> = {
+    id: "priority-view",
+    version: "1.0.0",
+    semanticType: "text",
+    meaning: {
+      required: ["required"],
+      preserved: ["low", "high"],
+      priorities: [
+        { path: "low", priority: 10 },
+        { path: "high", priority: 1 },
+      ],
+      discarded: [],
+    },
+    project: () => ({ required: "R", low: "L", high: "H" }),
+  };
+  const core = new ProjectionCore({ adapters: [adapter], semanticContracts: [contract], views: [priorityView] });
+  const retained = stableJsonStringify({ high: "H", required: "R" });
+  const result = core.project({
+    source: "fixture",
+    adapter: "text",
+    view: "priority-view",
+    budget: new TextEncoder().encode(retained).byteLength,
+    renderer: "json",
+  });
+
+  assert.equal(result.output, retained);
+  assert.deepEqual(result.loss.reductions, [{ kind: "semantic-priority", path: "low", count: 1 }]);
 });
 
 test("collection reduction retains stable item order and reports omission counts", () => {
@@ -352,4 +408,32 @@ test("representation reduction is opt-in and can make required UTF-8 output fit"
 
   assert.equal(result.output, retained);
   assert.deepEqual(result.loss.reductions, [{ kind: "ansi-removal", path: "message" }]);
+
+  const ansiViewNoReduction: View<{ message: string }> = {
+    id: "ansi-view-no-reduction",
+    version: "1.0.0",
+    semanticType: "text",
+    meaning: {
+      required: ["message"],
+      preserved: ["message"],
+      discarded: [],
+    },
+    project: () => ({ message: "\u001b[31m日本語\u001b[0m" }),
+  };
+  const coreNoReduction = new ProjectionCore({
+    adapters: [adapter],
+    semanticContracts: [contract],
+    views: [ansiViewNoReduction],
+  });
+  assertErrorCode(
+    () =>
+      coreNoReduction.project({
+        source: "fixture",
+        adapter: "text",
+        view: "ansi-view-no-reduction",
+        budget: new TextEncoder().encode(retained).byteLength,
+        renderer: "json",
+      }),
+    "BUDGET_TOO_SMALL",
+  );
 });
