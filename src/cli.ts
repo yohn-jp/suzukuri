@@ -184,8 +184,8 @@ function profileRun(parsed: ParsedArguments): number {
   if (name === undefined) {
     throw new CliUsageError("profile run requires a profile name.");
   }
-  const input = readInput(parsed);
   const profile = resolveProfile(loadProfileDocument(profilePath(parsed)), name);
+  const input = readInput(parsed);
   const result = runProfile(profile, input, { core: createProfileCore() });
   if (outputFormat(parsed) === "text") {
     printText(renderedText(result.output));
