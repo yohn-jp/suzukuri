@@ -34,13 +34,14 @@
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run typecheck && pnpm test"
   },
-  "dependencies": {},
+  "dependencies": {
+    "typescript": "^6.0.3"
+  },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "eslint": "10.8.1",
     "prettier": "3.9.6",
     "tsx": "^4.23.12",
-    "typescript": "^6.0.3",
     "typescript-eslint": "8.66.0"
   },
   "engines": {
