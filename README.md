@@ -24,6 +24,23 @@ import { ProjectionCore, createBudget, validationSuccess } from "@yohn-jp/suzuku
 
 Projection is caller-driven. An adapter and view are always selected explicitly; the core never auto-detects adapters or silently falls back to another component. Ordinary projection is synchronous and does not require a daemon, database, network, or persistent source store.
 
+## Source views
+
+The package exports an explicit TypeScript source adapter with versioned symbol-index and selected-symbol views. `generic-text` is a separate, explicitly selected adapter with a weaker contract: it preserves normalized text only and does not claim declaration, type, or containment semantics. A TypeScript parse failure never selects `generic-text` automatically.
+
+```ts
+import { createSourceProjectionCore } from "@yohn-jp/suzukuri";
+
+const core = createSourceProjectionCore();
+const result = core.project({
+  source: { identity: "src/example.ts", content: "export const answer: number = 42;" },
+  adapter: "typescript-source",
+  view: "typescript-symbol-index",
+  budget: 4096,
+  renderer: "json",
+});
+```
+
 ## Repository-local profiles
 
 The v0 profile document is `.suzukuri/profiles.json` (or a path supplied with `--profiles`). Its schema is JSON and has one versioned top-level document:

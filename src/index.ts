@@ -11,6 +11,7 @@ export * from "./diagnostics.js";
 export * from "./adapters/index.js";
 export * from "./views/index.js";
 export * from "./builtin.js";
+export * from "./source-code.js";
 export * from "./profile-builtins.js";
 export * from "./profiles.js";
 export * from "./git.js";
