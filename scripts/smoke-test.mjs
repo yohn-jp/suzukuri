@@ -96,32 +96,27 @@ function main() {
     const profileDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-profile-smoke-"));
     try {
       const profilePath = path.join(profileDirectory, "profiles.json");
-      const inputPath = path.join(profileDirectory, "input.txt");
-      fs.writeFileSync(
-        profilePath,
-        JSON.stringify({
-          schemaVersion: 1,
-          profiles: [
-            {
-              name: "text-value",
-              description: "Smoke-test text profile.",
-              source: { description: "Caller-supplied text.", mediaType: "text/plain" },
-              adapter: "profile-text",
-              view: "profile-text",
-              budget: { unit: "utf8-bytes", maxBytes: 1024 },
-              renderer: "json",
-            },
-          ],
-        }),
-      );
-      fs.writeFileSync(inputPath, "packed profile input");
+      const profileFixture = JSON.parse(fs.readFileSync(path.join(repoRoot, ".suzukuri", "profiles.json"), "utf8"));
+      fs.writeFileSync(profilePath, JSON.stringify(profileFixture));
+      const profileInputs = {
+        "json-keys": '{"z": 1, "a": 2, "message": "重要"}',
+        "json-value": '{"z": 1, "a": 2, "message": "重要"}',
+        "text-lines": "first line\n重要な二行目\nthird line",
+        "text-summary": "A deterministic summary with multibyte text: 日本語",
+        "text-value": "packed profile input with 日本語",
+      };
+      const profileNames = Object.keys(profileInputs);
 
       for (const { name } of binTargets) {
         const launcher = path.join(binDirectory, name);
         if (!fs.existsSync(launcher)) fail(`npm did not generate a launcher for "${name}" at ${launcher}`);
 
         console.log(`running ${name} --help through its installed launcher...`);
-        const helpResult = spawnSync(launcher, ["--help"], { cwd: installDirectory, encoding: "utf8", timeout: 10_000 });
+        const helpResult = spawnSync(launcher, ["--help"], {
+          cwd: installDirectory,
+          encoding: "utf8",
+          timeout: 10_000,
+        });
         if (helpResult.error) fail(`launcher "${name}" failed to start: ${helpResult.error.message}`);
         if (helpResult.status !== 0) fail(`launcher "${name}" --help exited ${helpResult.status}, expected 0`);
 
@@ -140,21 +135,26 @@ function main() {
           cwd: installDirectory,
         });
         const validation = JSON.parse(validateResult.stdout);
-        if (validation.valid !== true || validation.profileCount !== 1) {
+        if (validation.valid !== true || validation.profileCount !== profileNames.length) {
           fail(`installed profile validation returned an unexpected result: ${validateResult.stdout}`);
         }
 
-        console.log(`running ${name} profile run through its installed launcher...`);
-        const profileResult = run(
-          launcher,
-          ["profile", "run", "text-value", "--profiles", profilePath, "--input", inputPath],
-          { cwd: installDirectory },
-        );
-        const profileOutput = JSON.parse(profileResult.stdout);
-        if (profileOutput.profile !== "text-value" || profileOutput.output !== '{"text":"packed profile input"}') {
-          fail(`installed profile run returned an unexpected result: ${profileResult.stdout}`);
+        for (const profileName of profileNames) {
+          const inputPath = path.join(profileDirectory, `${profileName}.input`);
+          fs.writeFileSync(inputPath, profileInputs[profileName]);
+          console.log(`running ${name} profile ${profileName} through its installed launcher...`);
+          const profileResult = run(
+            launcher,
+            ["profile", "run", profileName, "--profiles", profilePath, "--input", inputPath],
+            { cwd: installDirectory },
+          );
+          const profileOutput = JSON.parse(profileResult.stdout);
+          if (profileOutput.profile !== profileName || typeof profileOutput.output !== "string") {
+            fail(`installed profile ${profileName} returned an unexpected result: ${profileResult.stdout}`);
+          }
         }
 
+        const inputPath = path.join(profileDirectory, "text-value.input");
         console.log(`running ${name} project through its installed launcher...`);
         const projectResult = run(
           launcher,
@@ -174,9 +174,22 @@ function main() {
           { cwd: installDirectory },
         );
         const projectOutput = JSON.parse(projectResult.stdout);
-        if (projectOutput.output !== '{"text":"packed profile input"}') {
+        if (typeof projectOutput.output !== "string" || !projectOutput.output.includes("packed profile input")) {
           fail(`installed project returned an unexpected result: ${projectResult.stdout}`);
         }
+
+        const callerScript = path.join(installDirectory, "external-caller.mjs");
+        fs.writeFileSync(
+          callerScript,
+          `import { createProfileCore } from ${JSON.stringify(packageName)};\n` +
+            "const core = createProfileCore();\n" +
+            'const result = core.project({ source: { identity: "external-caller:observation-1", content: "external source" }, adapter: "profile-text", view: "profile-text", budget: 1024, renderer: "json" });\n' +
+            'if (result.provenance.source?.identity !== "external-caller:observation-1") process.exit(1);\n' +
+            'if (result.components.adapter.id !== "profile-text" || result.components.view.id !== "profile-text") process.exit(1);\n' +
+            'if ("task" in result || "policy" in result) process.exit(1);\n' +
+            'console.log("external caller integration passed");\n',
+        );
+        run(process.execPath, [callerScript], { cwd: installDirectory, stdio: "inherit" });
       }
     } finally {
       fs.rmSync(profileDirectory, { recursive: true, force: true });

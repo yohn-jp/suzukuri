@@ -120,6 +120,9 @@ export interface ViewReduceInput<TProjection = unknown> {
   readonly meaning: ViewMeaning;
 }
 
+type UnspecifiedViewReducer = (...args: never[]) => unknown;
+export type ViewReducer<TProjection> = ((input: ViewReduceInput<TProjection>) => unknown) | UnspecifiedViewReducer;
+
 export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly semanticType: string;
   readonly meaning?: ViewMeaning;
@@ -136,7 +139,7 @@ export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly allowedReductions?: readonly SemanticReductionDeclaration[];
   project(input: ViewProjectInput): TProjection | ViewProjection<TProjection>;
   /** Optional view-owned reduction hook for typed projections with custom semantics. */
-  reduce?(input: ViewReduceInput<unknown>): unknown;
+  readonly reduce?: ViewReducer<TProjection>;
 }
 
 export type BudgetUnit = "utf8-bytes";
@@ -516,7 +519,7 @@ export class ProjectionCore {
     return this.registerSemanticContract(contract);
   }
 
-  registerView(view: View): this {
+  registerView<TProjection>(view: View<TProjection>): this {
     this.views.register(view);
     return this;
   }
