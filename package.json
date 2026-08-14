@@ -1,5 +1,5 @@
 {
-  "name": "@yohn-jp/suzukuri",
+  "name": "suzukuri",
   "version": "0.1.0",
   "description": "Deterministic bounded semantic projections for CLI and library consumers.",
   "type": "module",
