@@ -21,7 +21,10 @@ function main() {
   const distEntry = path.join(repoRoot, "dist", "index.js");
   if (!fs.existsSync(distEntry)) throw new Error("dist is missing; run pnpm run build before the package suite");
 
-  const packResult = run("npm", ["pack", "--dry-run", "--json"]);
+  // --ignore-scripts: dist is already built above; without this, npm's prepack
+  // hook re-runs the build and chmod-bin.mjs's stdout log interleaves with
+  // this command's --json output, breaking JSON.parse (npm >=10).
+  const packResult = run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"]);
   const [packInfo] = JSON.parse(packResult.stdout);
   const packedFiles = packInfo.files.map((entry) => entry.path);
 
