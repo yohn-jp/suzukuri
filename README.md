@@ -81,6 +81,29 @@ suzukuri views
 
 The TypeScript entry point exports `parseProfileDocument`, `resolveProfile`, `runProfile`, `createProfileCore`, and the inspection helpers used by these commands. The caller supplies the source body to `runProfile`; the same `ProjectionCore` and registries are used for profile and low-level projection.
 
+## Product boundary and loss semantics
+
+Suzukuri owns deterministic source decoding, semantic-contract validation, view selection, bounded projection, provenance, and rendering. The caller owns task classification, adapter/view selection, source lifetime, execution policy, and any higher-level orchestration. Suzukuri does not import caller task or policy state, infer a view, auto-select a fallback adapter, persist source data, or call a model/network service.
+
+Every projection carries component identities, source provenance when supplied, a stable projection digest, completeness, and machine-readable loss metadata. A UTF-8 byte budget is a hard ceiling. Required meaning is retained or the projection fails explicitly with `BUDGET_TOO_SMALL`; optional meaning is reduced only through the selected view's declared priorities and reductions. `generic-text` is an explicit weak-contract adapter, not an automatic recovery path.
+
+## v0 support matrix
+
+| Semantic family        | Explicit adapters              | Views                                            | Input boundary                  |
+| ---------------------- | ------------------------------ | ------------------------------------------------ | ------------------------------- |
+| Repository profiles    | `profile-text`, `profile-json` | text, lines, text summary, JSON value, JSON keys | caller-supplied text/JSON       |
+| Git                    | `git-diff`, `git-status`       | summary, files, hunks                            | unified diff / porcelain status |
+| Test results           | `vitest`                       | summary, failures                                | representative Vitest text/JSON |
+| Diagnostics            | `typescript-diagnostics`       | errors, files                                    | TypeScript diagnostic text/JSON |
+| TypeScript source      | `typescript-source`            | symbol index, explicitly selected symbol detail  | caller-supplied TypeScript      |
+| Explicit weak fallback | `generic-text`                 | normalized text                                  | caller-selected generic text    |
+
+The support matrix is intentionally finite: unsupported producers or languages fail validation rather than silently changing semantic contracts.
+
+## Conformance and release evidence
+
+`pnpm run conformance` runs the executable v0 fixture suite and reports byte reduction, projection latency, automatic fallback rate, required/preserved meaning, and comparison with naive byte truncation. `pnpm run verify` additionally builds the package, checks packed contents, installs the tarball into an isolated consumer, runs all five repository profiles through the installed CLI, and verifies an external TypeScript caller can consume stable provenance without caller state crossing the boundary.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

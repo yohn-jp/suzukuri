@@ -28,6 +28,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "smoke-test": "node scripts/smoke-test.mjs",
+    "conformance:report": "node scripts/conformance-report.mjs",
+    "conformance": "pnpm run build && pnpm run conformance:report",
     "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
     "governance:actions": "node scripts/validate-actions.mjs",
     "verify": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run governance:actions && pnpm run test:package",
