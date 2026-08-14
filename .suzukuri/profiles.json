@@ -1,0 +1,81 @@
+{
+  "$schema": "suzukuri/profile/v1",
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "name": "json-keys",
+      "description": "Stable top-level key inventory for a JSON observation.",
+      "source": {
+        "description": "Caller-supplied UTF-8 JSON document.",
+        "mediaType": "application/json"
+      },
+      "adapter": "profile-json",
+      "view": "profile-json-keys",
+      "budget": {
+        "unit": "utf8-bytes",
+        "maxBytes": 1024
+      },
+      "renderer": "json"
+    },
+    {
+      "name": "json-value",
+      "description": "Structured JSON value with the standard machine renderer.",
+      "source": {
+        "description": "Caller-supplied UTF-8 JSON document.",
+        "mediaType": "application/json"
+      },
+      "adapter": "profile-json",
+      "view": "profile-json-value",
+      "budget": {
+        "unit": "utf8-bytes",
+        "maxBytes": 4096
+      },
+      "renderer": "json"
+    },
+    {
+      "name": "text-lines",
+      "description": "Deterministic line-oriented text observation.",
+      "source": {
+        "description": "Caller-supplied UTF-8 text.",
+        "mediaType": "text/plain"
+      },
+      "adapter": "profile-text",
+      "view": "profile-lines",
+      "budget": {
+        "unit": "utf8-bytes",
+        "maxBytes": 1024
+      },
+      "renderer": "text"
+    },
+    {
+      "name": "text-summary",
+      "description": "Text with deterministic character-count evidence.",
+      "source": {
+        "description": "Caller-supplied UTF-8 text.",
+        "mediaType": "text/plain"
+      },
+      "adapter": "profile-text",
+      "view": "profile-text-summary",
+      "budget": {
+        "unit": "utf8-bytes",
+        "maxBytes": 2048
+      },
+      "renderer": "json"
+    },
+    {
+      "name": "text-value",
+      "description": "Text observation rendered as stable machine JSON.",
+      "source": {
+        "description": "Caller-supplied UTF-8 text.",
+        "mediaType": "text/plain"
+      },
+      "adapter": "profile-text",
+      "view": "profile-text",
+      "budget": {
+        "unit": "utf8-bytes",
+        "maxBytes": 4096
+      },
+      "renderer": "json"
+    }
+  ]
+}

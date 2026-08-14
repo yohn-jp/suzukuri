@@ -398,7 +398,7 @@ export class ComponentRegistry<T extends ComponentIdentity> {
 
   describe(): readonly ComponentDescriptor[] {
     return this.list().map((component) => {
-      const descriptor: ComponentDescriptor = identityOf(component);
+      const descriptor: ComponentDescriptor = { ...identityOf(component) };
       if ("semanticType" in component && typeof component.semanticType === "string") {
         descriptor.semanticType = component.semanticType;
       }
@@ -790,11 +790,12 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
   let currentBytes = rendered.bytes.byteLength;
   const normalizedMeaning = freezeMeaning(input.meaning);
 
-  if (input.view.reduce !== undefined) {
+  if (typeof input.view.reduce === "function") {
     let reduced: ViewProjection;
     try {
+      const reduce = input.view.reduce as (input: ViewReduceInput) => unknown;
       reduced = normalizeViewProjection(
-        input.view.reduce({
+        reduce({
           projection,
           source: input.source,
           budget: input.budget,
