@@ -136,7 +136,7 @@ export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly allowedReductions?: readonly SemanticReductionDeclaration[];
   project(input: ViewProjectInput): TProjection | ViewProjection<TProjection>;
   /** Optional view-owned reduction hook for typed projections with custom semantics. */
-  readonly reduce?: (input: ViewReduceInput<TProjection>) => TProjection | ViewProjection<TProjection>;
+  reduce?(input: ViewReduceInput<unknown>): unknown;
 }
 
 export type BudgetUnit = "utf8-bytes";
@@ -805,7 +805,10 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
     } catch (error) {
       throw failure("VIEW_PROJECTION_FAILED", { view: identityOf(input.view) }, error);
     }
-    if (!sameSemanticValue(reduced.value, projection.value) && preservesRequiredMeaning(reduced.value, normalizedMeaning)) {
+    if (
+      !sameSemanticValue(reduced.value, projection.value) &&
+      preservesRequiredMeaning(reduced.value, normalizedMeaning)
+    ) {
       reduced = markReducedProjection(reduced, {
         kind: "view-reduction",
       });

@@ -291,17 +291,23 @@ test("standard renderers are deterministic and budget reduction follows semantic
   assert.deepEqual(result2.loss, result.loss);
 
   const tooSmallRequest = { ...requestJson, budget: 1 };
-  assert.throws(() => core.project(tooSmallRequest), (err: unknown) => {
-    const err1 = err as SuzukuriError;
-    assert.throws(() => core.project(tooSmallRequest), (err2: unknown) => {
-      const err2Typed = err2 as SuzukuriError;
-      assert.equal(err1.code, "BUDGET_TOO_SMALL");
-      assert.equal(err2Typed.code, err1.code);
-      assert.deepEqual(err2Typed.details, err1.details);
+  assert.throws(
+    () => core.project(tooSmallRequest),
+    (err: unknown) => {
+      const err1 = err as SuzukuriError;
+      assert.throws(
+        () => core.project(tooSmallRequest),
+        (err2: unknown) => {
+          const err2Typed = err2 as SuzukuriError;
+          assert.equal(err1.code, "BUDGET_TOO_SMALL");
+          assert.equal(err2Typed.code, err1.code);
+          assert.deepEqual(err2Typed.details, err1.details);
+          return true;
+        },
+      );
       return true;
-    });
-    return true;
-  });
+    },
+  );
 
   const textRequest = { ...requestJson, renderer: "text" };
   const textResult1 = core.project(textRequest);
