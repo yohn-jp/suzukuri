@@ -15,7 +15,10 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json
 const packageName = packageJson.name;
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: "utf8", ...options });
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000, ...options });
+  if (result.error) {
+    throw new Error(`${command} ${args.join(" ")} failed: ${result.error.message}`);
+  }
   if (result.status !== 0) {
     throw new Error(
       `${command} ${args.join(" ")} failed (status ${result.status}):\n${result.stdout}\n${result.stderr}`,
@@ -89,47 +92,48 @@ function main() {
     // Goes through node_modules/.bin so a broken npm-generated launcher is
     // caught too — checking bin target existence alone would miss that.
     const binDirectory = path.join(installDirectory, "node_modules", ".bin");
-    for (const { name } of binTargets) {
-      const launcher = path.join(binDirectory, name);
-      if (!fs.existsSync(launcher)) fail(`npm did not generate a launcher for "${name}" at ${launcher}`);
 
-      console.log(`running ${name} --help through its installed launcher...`);
-      const helpResult = spawnSync(launcher, ["--help"], { cwd: installDirectory, encoding: "utf8", timeout: 10_000 });
-      if (helpResult.error) fail(`launcher "${name}" failed to start: ${helpResult.error.message}`);
-      if (helpResult.status !== 0) fail(`launcher "${name}" --help exited ${helpResult.status}, expected 0`);
+    const profileDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-profile-smoke-"));
+    try {
+      const profilePath = path.join(profileDirectory, "profiles.json");
+      const inputPath = path.join(profileDirectory, "input.txt");
+      fs.writeFileSync(
+        profilePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          profiles: [
+            {
+              name: "text-value",
+              description: "Smoke-test text profile.",
+              source: { description: "Caller-supplied text.", mediaType: "text/plain" },
+              adapter: "profile-text",
+              view: "profile-text",
+              budget: { unit: "utf8-bytes", maxBytes: 1024 },
+              renderer: "json",
+            },
+          ],
+        }),
+      );
+      fs.writeFileSync(inputPath, "packed profile input");
 
-      console.log(`running ${name} --version through its installed launcher...`);
-      const versionResult = spawnSync(launcher, ["--version"], {
-        cwd: installDirectory,
-        encoding: "utf8",
-        timeout: 10_000,
-      });
-      if (versionResult.error) fail(`launcher "${name}" failed to start: ${versionResult.error.message}`);
-      if (versionResult.status !== 0) fail(`launcher "${name}" --version exited ${versionResult.status}, expected 0`);
-      if (versionResult.stdout.trim().length === 0) fail(`launcher "${name}" --version printed nothing`);
+      for (const { name } of binTargets) {
+        const launcher = path.join(binDirectory, name);
+        if (!fs.existsSync(launcher)) fail(`npm did not generate a launcher for "${name}" at ${launcher}`);
 
-      const profileDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-profile-smoke-"));
-      try {
-        const profilePath = path.join(profileDirectory, "profiles.json");
-        const inputPath = path.join(profileDirectory, "input.txt");
-        fs.writeFileSync(
-          profilePath,
-          JSON.stringify({
-            schemaVersion: 1,
-            profiles: [
-              {
-                name: "text-value",
-                description: "Smoke-test text profile.",
-                source: { description: "Caller-supplied text.", mediaType: "text/plain" },
-                adapter: "profile-text",
-                view: "profile-text",
-                budget: { unit: "utf8-bytes", maxBytes: 1024 },
-                renderer: "json",
-              },
-            ],
-          }),
-        );
-        fs.writeFileSync(inputPath, "packed profile input");
+        console.log(`running ${name} --help through its installed launcher...`);
+        const helpResult = spawnSync(launcher, ["--help"], { cwd: installDirectory, encoding: "utf8", timeout: 10_000 });
+        if (helpResult.error) fail(`launcher "${name}" failed to start: ${helpResult.error.message}`);
+        if (helpResult.status !== 0) fail(`launcher "${name}" --help exited ${helpResult.status}, expected 0`);
+
+        console.log(`running ${name} --version through its installed launcher...`);
+        const versionResult = spawnSync(launcher, ["--version"], {
+          cwd: installDirectory,
+          encoding: "utf8",
+          timeout: 10_000,
+        });
+        if (versionResult.error) fail(`launcher "${name}" failed to start: ${versionResult.error.message}`);
+        if (versionResult.status !== 0) fail(`launcher "${name}" --version exited ${versionResult.status}, expected 0`);
+        if (versionResult.stdout.trim().length === 0) fail(`launcher "${name}" --version printed nothing`);
 
         console.log(`running ${name} profile validate through its installed launcher...`);
         const validateResult = run(launcher, ["profile", "validate", "--profiles", profilePath], {
@@ -173,9 +177,9 @@ function main() {
         if (projectOutput.output !== '{"text":"packed profile input"}') {
           fail(`installed project returned an unexpected result: ${projectResult.stdout}`);
         }
-      } finally {
-        fs.rmSync(profileDirectory, { recursive: true, force: true });
       }
+    } finally {
+      fs.rmSync(profileDirectory, { recursive: true, force: true });
     }
 
     console.log("smoke test passed.");

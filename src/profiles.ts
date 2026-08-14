@@ -521,10 +521,11 @@ export function profileReferenceIdentity(reference: ComponentReference): Compone
 }
 
 export function stableProfileJson(document: ProfileDocument): string {
+  const sortedProfiles = [...document.profiles].sort((left, right) => compareStrings(left.name, right.name));
   return JSON.stringify(
     {
       schemaVersion: document.schemaVersion,
-      profiles: document.profiles.map((profile) => ({
+      profiles: sortedProfiles.map((profile) => ({
         name: profile.name,
         description: profile.description,
         source: profile.source,

@@ -136,8 +136,7 @@ export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly allowedReductions?: readonly SemanticReductionDeclaration[];
   project(input: ViewProjectInput): TProjection | ViewProjection<TProjection>;
   /** Optional view-owned reduction hook for typed projections with custom semantics. */
-  /** Optional view-owned reduction hook. Its concrete function is checked at the invocation boundary. */
-  readonly reduce?: unknown;
+  readonly reduce?: (input: ViewReduceInput<TProjection>) => TProjection | ViewProjection<TProjection>;
 }
 
 export type BudgetUnit = "utf8-bytes";

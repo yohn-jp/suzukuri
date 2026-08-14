@@ -92,7 +92,13 @@ export async function runCli(argv: string[]): Promise<number> {
     printHelp();
     return 1;
   } catch (error) {
-    printError(error, outputFormat(parsed));
+    let format: OutputFormat = "json";
+    try {
+      format = outputFormat(parsed);
+    } catch {
+      // If outputFormat itself throws (e.g., invalid --format), fall back to json
+    }
+    printError(error, format);
     return 1;
   }
 }
@@ -256,6 +262,7 @@ function inspectRuntime(kind: InspectionKind) {
 function parseArguments(argv: readonly string[]): ParsedArguments {
   const positionals: string[] = [];
   const options: Record<string, OptionValue> = {};
+  const knownBooleanOptions = new Set(["help", "version", "human"]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "-") {
@@ -273,6 +280,10 @@ function parseArguments(argv: readonly string[]): ParsedArguments {
     const equals = normalized.indexOf("=");
     if (equals !== -1) {
       options[normalized.slice(0, equals)] = normalized.slice(equals + 1);
+      continue;
+    }
+    if (knownBooleanOptions.has(normalized)) {
+      options[normalized] = true;
       continue;
     }
     const next = argv[index + 1];
@@ -382,7 +393,7 @@ function printHelp(): void {
       "  profile show <name> [--profiles path]",
       "  profile validate [--profiles path]",
       "  profile run <name> --input <path|-> [--profiles path]",
-      "  project --adapter <id> --view <id> --budget <bytes> --renderer <id> --input <path|->",
+      "  project --adapter <id> --view <id> --budget <bytes> --renderer <id> --input <path|-> [--contract <id>]",
       "  adapters | views | contracts | renderers",
       "  inspect <adapters|views|contracts|renderers>",
       "",

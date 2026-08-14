@@ -118,13 +118,13 @@ export const profileJsonKeysView: View<{ keys: string[]; count: number }> = Obje
 
 export const defaultProfileAdapters = Object.freeze([profileJsonAdapter, profileTextAdapter]);
 export const defaultProfileContracts = Object.freeze([profileJsonContract, profileTextContract]);
-export const defaultProfileViews = Object.freeze([
+export const defaultProfileViews: readonly View<unknown>[] = Object.freeze([
   profileJsonKeysView,
   profileJsonValueView,
   profileLinesView,
   profileTextSummaryView,
   profileTextView,
-]);
+] as View<unknown>[]);
 export const defaultProfileRenderers = Object.freeze([jsonRenderer, textRenderer]);
 
 export function createProfileCore(): ProjectionCore {
