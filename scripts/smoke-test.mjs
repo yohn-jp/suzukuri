@@ -107,6 +107,75 @@ function main() {
       if (versionResult.error) fail(`launcher "${name}" failed to start: ${versionResult.error.message}`);
       if (versionResult.status !== 0) fail(`launcher "${name}" --version exited ${versionResult.status}, expected 0`);
       if (versionResult.stdout.trim().length === 0) fail(`launcher "${name}" --version printed nothing`);
+
+      const profileDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-profile-smoke-"));
+      try {
+        const profilePath = path.join(profileDirectory, "profiles.json");
+        const inputPath = path.join(profileDirectory, "input.txt");
+        fs.writeFileSync(
+          profilePath,
+          JSON.stringify({
+            schemaVersion: 1,
+            profiles: [
+              {
+                name: "text-value",
+                description: "Smoke-test text profile.",
+                source: { description: "Caller-supplied text.", mediaType: "text/plain" },
+                adapter: "profile-text",
+                view: "profile-text",
+                budget: { unit: "utf8-bytes", maxBytes: 1024 },
+                renderer: "json",
+              },
+            ],
+          }),
+        );
+        fs.writeFileSync(inputPath, "packed profile input");
+
+        console.log(`running ${name} profile validate through its installed launcher...`);
+        const validateResult = run(launcher, ["profile", "validate", "--profiles", profilePath], {
+          cwd: installDirectory,
+        });
+        const validation = JSON.parse(validateResult.stdout);
+        if (validation.valid !== true || validation.profileCount !== 1) {
+          fail(`installed profile validation returned an unexpected result: ${validateResult.stdout}`);
+        }
+
+        console.log(`running ${name} profile run through its installed launcher...`);
+        const profileResult = run(
+          launcher,
+          ["profile", "run", "text-value", "--profiles", profilePath, "--input", inputPath],
+          { cwd: installDirectory },
+        );
+        const profileOutput = JSON.parse(profileResult.stdout);
+        if (profileOutput.profile !== "text-value" || profileOutput.output !== '{"text":"packed profile input"}') {
+          fail(`installed profile run returned an unexpected result: ${profileResult.stdout}`);
+        }
+
+        console.log(`running ${name} project through its installed launcher...`);
+        const projectResult = run(
+          launcher,
+          [
+            "project",
+            "--adapter",
+            "profile-text",
+            "--view",
+            "profile-text",
+            "--budget",
+            "1024",
+            "--renderer",
+            "json",
+            "--input",
+            inputPath,
+          ],
+          { cwd: installDirectory },
+        );
+        const projectOutput = JSON.parse(projectResult.stdout);
+        if (projectOutput.output !== '{"text":"packed profile input"}') {
+          fail(`installed project returned an unexpected result: ${projectResult.stdout}`);
+        }
+      } finally {
+        fs.rmSync(profileDirectory, { recursive: true, force: true });
+      }
     }
 
     console.log("smoke test passed.");

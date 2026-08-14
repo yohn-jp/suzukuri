@@ -136,7 +136,8 @@ export interface View<TProjection = unknown> extends ComponentIdentity {
   readonly allowedReductions?: readonly SemanticReductionDeclaration[];
   project(input: ViewProjectInput): TProjection | ViewProjection<TProjection>;
   /** Optional view-owned reduction hook for typed projections with custom semantics. */
-  readonly reduce?: (input: ViewReduceInput<TProjection>) => TProjection | ViewProjection<TProjection>;
+  /** Optional view-owned reduction hook. Its concrete function is checked at the invocation boundary. */
+  readonly reduce?: unknown;
 }
 
 export type BudgetUnit = "utf8-bytes";
@@ -398,7 +399,7 @@ export class ComponentRegistry<T extends ComponentIdentity> {
 
   describe(): readonly ComponentDescriptor[] {
     return this.list().map((component) => {
-      const descriptor: ComponentDescriptor = identityOf(component);
+      const descriptor: ComponentDescriptor = { ...identityOf(component) };
       if ("semanticType" in component && typeof component.semanticType === "string") {
         descriptor.semanticType = component.semanticType;
       }
@@ -790,11 +791,12 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
   let currentBytes = rendered.bytes.byteLength;
   const normalizedMeaning = freezeMeaning(input.meaning);
 
-  if (input.view.reduce !== undefined) {
+  if (typeof input.view.reduce === "function") {
     let reduced: ViewProjection;
     try {
+      const reduce = input.view.reduce as (input: ViewReduceInput) => unknown;
       reduced = normalizeViewProjection(
-        input.view.reduce({
+        reduce({
           projection,
           source: input.source,
           budget: input.budget,
@@ -805,7 +807,10 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
     } catch (error) {
       throw failure("VIEW_PROJECTION_FAILED", { view: identityOf(input.view) }, error);
     }
-    if (!sameSemanticValue(reduced.value, projection.value) && preservesRequiredMeaning(reduced.value, normalizedMeaning)) {
+    if (
+      !sameSemanticValue(reduced.value, projection.value) &&
+      preservesRequiredMeaning(reduced.value, normalizedMeaning)
+    ) {
       reduced = markReducedProjection(reduced, {
         kind: "view-reduction",
       });
