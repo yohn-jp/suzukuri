@@ -5,7 +5,7 @@ Suzukuri is a deterministic, bounded semantic view engine. It provides an explic
 ## Install
 
 ```bash
-npm install -g @yohn-jp/suzukuri
+npm install -g suzukuri
 ```
 
 ## Usage
@@ -19,7 +19,7 @@ suzukuri --help
 The package entry point exports the same versioned projection core used by the CLI:
 
 ```ts
-import { ProjectionCore, createBudget, validationSuccess } from "@yohn-jp/suzukuri";
+import { ProjectionCore, createBudget, validationSuccess } from "suzukuri";
 ```
 
 Projection is caller-driven. An adapter and view are always selected explicitly; the core never auto-detects adapters or silently falls back to another component. Ordinary projection is synchronous and does not require a daemon, database, network, or persistent source store.
@@ -29,7 +29,7 @@ Projection is caller-driven. An adapter and view are always selected explicitly;
 The package exports an explicit TypeScript source adapter with versioned symbol-index and selected-symbol views. `generic-text` is a separate, explicitly selected adapter with a weaker contract: it preserves normalized text only and does not claim declaration, type, or containment semantics. A TypeScript parse failure never selects `generic-text` automatically.
 
 ```ts
-import { createSourceProjectionCore } from "@yohn-jp/suzukuri";
+import { createSourceProjectionCore } from "suzukuri";
 
 const core = createSourceProjectionCore();
 const result = core.project({
