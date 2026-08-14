@@ -53,7 +53,17 @@ test("missing --input exits 1", async () => {
   console.log = () => {};
   console.error = (msg: string) => errors.push(msg);
   try {
-    const exitCode = await runCli(["project", "--adapter", "profile-text", "--view", "profile-text", "--budget", "1024", "--renderer", "json"]);
+    const exitCode = await runCli([
+      "project",
+      "--adapter",
+      "profile-text",
+      "--view",
+      "profile-text",
+      "--budget",
+      "1024",
+      "--renderer",
+      "json",
+    ]);
     assert.equal(exitCode, 1);
     assert.match(errors.join("\n"), /--input/);
   } finally {
@@ -69,7 +79,15 @@ test("unresolvable profile name exits 1", async () => {
   console.log = () => {};
   console.error = (msg: string) => errors.push(msg);
   try {
-    const exitCode = await runCli(["profile", "run", "nonexistent-profile", "--profiles", profileFixture, "--input", "-"]);
+    const exitCode = await runCli([
+      "profile",
+      "run",
+      "nonexistent-profile",
+      "--profiles",
+      profileFixture,
+      "--input",
+      "-",
+    ]);
     assert.equal(exitCode, 1);
     assert.match(errors.join("\n"), /PROFILE_NOT_FOUND/);
   } finally {
@@ -140,7 +158,15 @@ test("profile run accepts caller-supplied source and resolves the named profile"
     const inputPath = path.join(tempDirectory, "input.txt");
     fs.writeFileSync(inputPath, "hello");
     try {
-      const exitCode = await runCli(["profile", "run", "text-value", "--profiles", profileFixture, "--input", inputPath]);
+      const exitCode = await runCli([
+        "profile",
+        "run",
+        "text-value",
+        "--profiles",
+        profileFixture,
+        "--input",
+        inputPath,
+      ]);
       assert.equal(exitCode, 0);
       const result = JSON.parse(lines.pop() ?? "{}") as { profile: string; output: string };
       assert.equal(result.profile, "text-value");
