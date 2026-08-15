@@ -55,9 +55,9 @@ This repo uses [Conventional Commits](https://www.conventionalcommits.org/):
 - Link exactly one Issue using a closing reference such as `Closes #123`.
 - Keep the pull request template sections.
 - CI (typecheck, lint, test, build, package check) must pass.
-- The `Governance / validate-pr` check enforces the branch-name and
-  linked-Issue contract — see [`scripts/validate-pr.mjs`](scripts/validate-pr.mjs)
-  and [`scripts/validate-branch-name.mjs`](scripts/validate-branch-name.mjs)
+- The shared PR governance workflow enforces the branch-name and PR content
+  contract through the organization-owned `gh-inari` authority. See the
+  [shared governance contract](https://github.com/yohn-jp/.github/blob/main/docs/governance.md)
   for the exact rules.
 
 ## Reporting bugs / requesting features
