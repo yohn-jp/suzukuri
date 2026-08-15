@@ -53,7 +53,7 @@ This repo uses [Conventional Commits](https://www.conventionalcommits.org/):
 
 - Describe what changed and why.
 - Link exactly one Issue using a closing reference such as `Closes #123`.
-- Keep the pull request template sections.
+- Use the organization-default pull request template.
 - CI (typecheck, lint, test, build, package check) must pass.
 - The shared PR governance workflow enforces the branch-name and PR content
   contract through the organization-owned `gh-inari` authority. See the
