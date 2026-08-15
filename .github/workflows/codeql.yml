@@ -8,34 +8,16 @@ on:
   schedule:
     - cron: "31 3 * * 1"
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [javascript-typescript, actions]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
-        with:
-          languages: ${{ matrix.language }}
-          config-file: ./.github/codeql/codeql-config.yml
-          build-mode: none
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
-        with:
-          category: "/language:${{ matrix.language }}"
+      actions: read
+    uses: yohn-jp/.github/.github/workflows/codeql.yml@4fb520dcfc63f386a2e33d6c0a74f251f8dc9bdb
+    with:
+      languages: "javascript-typescript,actions"
+      config-file: ".github/codeql/codeql-config.yml"
