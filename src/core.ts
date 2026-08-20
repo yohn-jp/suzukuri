@@ -755,6 +755,7 @@ interface ReductionOperation {
   readonly path?: string;
   readonly count?: number;
   readonly operationKey?: string;
+  readonly explicit?: boolean;
   apply(value: unknown): unknown;
 }
 
@@ -809,10 +810,7 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
     } catch (error) {
       throw failure("VIEW_PROJECTION_FAILED", { view: identityOf(input.view) }, error);
     }
-    if (
-      !sameSemanticValue(reduced.value, projection.value) &&
-      preservesRequiredMeaning(reduced.value, normalizedMeaning)
-    ) {
+    if (!sameSemanticValue(reduced.value, projection.value) && hasRequiredMeaning(reduced.value, normalizedMeaning)) {
       reduced = markReducedProjection(reduced, {
         kind: "view-reduction",
       });
@@ -842,7 +840,14 @@ function fitProjectionToBudget(input: BudgetFitInput): BudgetFitResult {
   const operations = reductionOperations(projection.value, normalizedMeaning);
   for (const operation of operations) {
     const value = operation.apply(projection.value);
-    if (sameSemanticValue(value, projection.value) || !preservesRequiredMeaning(value, normalizedMeaning)) {
+    if (sameSemanticValue(value, projection.value)) {
+      continue;
+    }
+    if (
+      operation.explicit
+        ? !hasRequiredMeaning(value, normalizedMeaning)
+        : !preservesRequiredMeaning(value, projection.value, normalizedMeaning)
+    ) {
       continue;
     }
     const candidate = markReducedProjection({ ...projection, value }, operation);
@@ -884,7 +889,18 @@ function fittedRequiredMinimum(
   let value = projection.value;
   const normalizedMeaning = freezeMeaning(meaning);
   for (const operation of reductionOperations(value, normalizedMeaning)) {
-    value = operation.apply(value);
+    const candidate = operation.apply(value);
+    if (sameSemanticValue(candidate, value)) {
+      continue;
+    }
+    if (
+      operation.explicit
+        ? !hasRequiredMeaning(candidate, normalizedMeaning)
+        : !preservesRequiredMeaning(candidate, value, normalizedMeaning)
+    ) {
+      continue;
+    }
+    value = candidate;
   }
   const minimumProjection = markReducedProjection({ ...projection, value }, { kind: "required-minimum" });
   try {
@@ -957,17 +973,13 @@ function reductionOperations(value: unknown, meaning: NormalizedViewMeaning): re
     add({
       kind,
       ...(normalized.path === undefined ? {} : { path: normalized.path }),
+      explicit: true,
       apply: (current) => applyRepresentationReduction(current, kind, normalized.path),
     });
   }
 
   const priorities = meaning.priorities;
-  const requiredPaths = new Set(meaning.required);
-  for (const priority of priorities) {
-    if (priority.required) {
-      requiredPaths.add(priority.path);
-    }
-  }
+  const requiredPaths = requiredMeaningPaths(meaning);
   const prioritized = priorities
     .map((priority, index) => ({ priority, index }))
     .filter(({ priority }) => !priority.required && !isProtectedPath(priority.path, requiredPaths))
@@ -1042,12 +1054,7 @@ function addPathOperations(
 }
 
 function isProtectedPath(path: string, required: ReadonlySet<string>): boolean {
-  for (const requiredPath of required) {
-    if (requiredPath === path || requiredPath.startsWith(`${path}.`) || requiredPath.startsWith(`${path}[`)) {
-      return true;
-    }
-  }
-  return false;
+  return [...required].some((requiredPath) => pathsOverlap(path, requiredPath));
 }
 
 function canonicalReductionKind(kind: string): SemanticReductionKind | undefined {
@@ -1169,14 +1176,39 @@ function getPath(value: unknown, path: string): unknown {
   return current;
 }
 
-function preservesRequiredMeaning(value: unknown, meaning: NormalizedViewMeaning): boolean {
+function hasRequiredMeaning(value: unknown, meaning: NormalizedViewMeaning): boolean {
+  return [...requiredMeaningPaths(meaning)].every((path) => hasPath(value, path));
+}
+
+function preservesRequiredMeaning(value: unknown, previous: unknown, meaning: NormalizedViewMeaning): boolean {
+  return [...requiredMeaningPaths(meaning)].every((path) => {
+    if (!hasPath(value, path)) {
+      return false;
+    }
+    return !hasPath(previous, path) || sameSemanticValue(getPath(value, path), getPath(previous, path));
+  });
+}
+
+function requiredMeaningPaths(meaning: NormalizedViewMeaning): ReadonlySet<string> {
   const required = new Set(meaning.required);
   for (const priority of meaning.priorities) {
     if (priority.required) {
       required.add(priority.path);
     }
   }
-  return [...required].every((path) => hasPath(value, path));
+  return required;
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  const leftSegments = pathSegments(left);
+  const rightSegments = pathSegments(right);
+  const commonLength = Math.min(leftSegments.length, rightSegments.length);
+  for (let index = 0; index < commonLength; index += 1) {
+    if (leftSegments[index] !== rightSegments[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function hasPath(value: unknown, path: string): boolean {
