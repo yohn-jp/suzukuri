@@ -374,6 +374,100 @@ test("collection reduction retains stable item order and reports omission counts
   assert.deepEqual(result.loss.reductions, [{ kind: "collection-item-omission", path: "entries", count: 2 }]);
 });
 
+test("required subtrees are protected while exact required children leave siblings reducible", () => {
+  type NestedProjection = {
+    object: { detail: string; optional: string; sibling: string };
+  };
+  const parentRequiredView: View<NestedProjection> = {
+    id: "required-parent-view",
+    version: "1.0.0",
+    semanticType: "text",
+    meaning: {
+      required: ["object"],
+      preserved: ["object.detail"],
+      optional: ["object.optional"],
+      discarded: [],
+    },
+    project: () => ({ object: { detail: "detail", optional: "optional", sibling: "sibling" } }),
+  };
+  const parentCore = new ProjectionCore({
+    adapters: [adapter],
+    semanticContracts: [contract],
+    views: [parentRequiredView],
+  });
+  const full = stableJsonStringify({ object: { detail: "detail", optional: "optional", sibling: "sibling" } });
+  assertErrorCode(
+    () =>
+      parentCore.project({
+        source: "fixture",
+        adapter: "text",
+        view: "required-parent-view",
+        budget: new TextEncoder().encode(full).byteLength - 1,
+        renderer: "json",
+      }),
+    "BUDGET_TOO_SMALL",
+  );
+
+  const childRequiredView: View<NestedProjection> = {
+    ...parentRequiredView,
+    id: "required-child-view",
+    meaning: {
+      required: ["object.detail"],
+      preserved: ["object.sibling"],
+      optional: ["object.optional"],
+      discarded: [],
+    },
+  };
+  const childCore = new ProjectionCore({
+    adapters: [adapter],
+    semanticContracts: [contract],
+    views: [childRequiredView],
+  });
+  const retained = stableJsonStringify({ object: { detail: "detail", sibling: "sibling" } });
+  const result = childCore.project({
+    source: "fixture",
+    adapter: "text",
+    view: "required-child-view",
+    budget: new TextEncoder().encode(retained).byteLength,
+    renderer: "json",
+  });
+  assert.equal(result.output, retained);
+  assert.deepEqual(result.loss.reductions, [{ kind: "optional-field", path: "object.optional", count: 1 }]);
+});
+
+test("required priority declarations protect their complete subtree", () => {
+  type PriorityProjection = { object: { detail: string; optional: string } };
+  const viewWithRequiredPriority: View<PriorityProjection> = {
+    id: "required-priority-view",
+    version: "1.0.0",
+    semanticType: "text",
+    meaning: {
+      required: [],
+      preserved: ["object.detail", "object.optional"],
+      priorities: [{ path: "object", priority: 0, required: true }],
+      discarded: [],
+    },
+    project: () => ({ object: { detail: "detail", optional: "optional" } }),
+  };
+  const core = new ProjectionCore({
+    adapters: [adapter],
+    semanticContracts: [contract],
+    views: [viewWithRequiredPriority],
+  });
+  const full = stableJsonStringify({ object: { detail: "detail", optional: "optional" } });
+  assertErrorCode(
+    () =>
+      core.project({
+        source: "fixture",
+        adapter: "text",
+        view: "required-priority-view",
+        budget: new TextEncoder().encode(full).byteLength - 1,
+        renderer: "json",
+      }),
+    "BUDGET_TOO_SMALL",
+  );
+});
+
 test("required-only overflow is deterministic and reports requested and minimum budgets", () => {
   const core = makeCore();
   assert.throws(
