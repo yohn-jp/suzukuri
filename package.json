@@ -44,7 +44,7 @@
     "eslint": "10.8.1",
     "prettier": "3.9.6",
     "tsx": "^4.23.12",
-    "typescript-eslint": "8.67.0"
+    "typescript-eslint": "8.68.0"
   },
   "engines": {
     "node": ">=22.13"
