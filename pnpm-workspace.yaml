@@ -1,11 +1,16 @@
 # List native-build packages here if pnpm's default ignored-builds
 # safety net blocks them (ERR_PNPM_IGNORED_BUILDS). esbuild (a transitive
 # dependency of tsx) is a known-safe, widely used build tool.
-# minimum-release-age is disabled globally in .npmrc (this is our own
-# product; we accept fresh releases immediately), so per-version excludes
-# here are unnecessary — don't let pnpm re-add them piecemeal.
 allowBuilds:
   esbuild: true
+
+# Policy (2026-09-21): this is our own product, so we accept freshly
+# published dependency releases immediately instead of waiting out pnpm's
+# default minimum-release-age safety window (the key belongs here, in
+# pnpm-workspace.yaml — NOT in .npmrc; minimum-release-age in .npmrc is a
+# different, no-op setting for this check). Do not re-ask about this each
+# update round.
+minimumReleaseAge: 0
 
 # Dependency pinning policy (2026-09-21): keep every dependency at latest
 # except where a concrete, checked incompatibility blocks it. Do not
