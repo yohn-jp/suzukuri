@@ -10,6 +10,7 @@ import {
   runBoundedProcess,
 } from "./execution.js";
 import { createProfileCore } from "./profile-builtins.js";
+import { runVerifyCommand } from "./verify-command.js";
 import {
   DEFAULT_PROFILE_PATH,
   type InspectionKind,
@@ -76,6 +77,9 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     if (command === "test") {
       return await runTestCommand(parsed);
+    }
+    if (command === "verify") {
+      return await runVerifyCommand({ positionals: parsed.positionals.slice(1), options: parsed.options });
     }
     if (command === "profile" || command === "profiles") {
       return runProfileCommand(parsed);
@@ -459,6 +463,7 @@ function printHelp(): void {
       "  profile validate [--profiles path]",
       "  profile run <name> --input <path|-> [--profiles path]",
       "  project --adapter <id> --view <id> --budget <bytes> --renderer <id> --input <path|-> [--contract <id>]",
+      "  verify [--config path] [--format json|text]",
       "  adapters | views | contracts | renderers",
       "  inspect <adapters|views|contracts|renderers>",
       "",
