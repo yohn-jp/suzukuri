@@ -1,6 +1,14 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import { type ComponentReference, createBudget, stableJsonStringify } from "./core.js";
+import { createBuiltinProjectionCore } from "./builtin.js";
+import {
+  ExecutionError,
+  loadExecutionConfig,
+  processResultExitCode,
+  resolveExecutionCommand,
+  runBoundedProcess,
+} from "./execution.js";
 import { createProfileCore } from "./profile-builtins.js";
 import {
   DEFAULT_PROFILE_PATH,
@@ -66,6 +74,9 @@ export async function runCli(argv: string[]): Promise<number> {
       printHelp();
       return 0;
     }
+    if (command === "test") {
+      return await runTestCommand(parsed);
+    }
     if (command === "profile" || command === "profiles") {
       return runProfileCommand(parsed);
     }
@@ -101,6 +112,59 @@ export async function runCli(argv: string[]): Promise<number> {
     printError(error, format);
     return 1;
   }
+}
+
+async function runTestCommand(parsed: ParsedArguments): Promise<number> {
+  const configPath = option(parsed, "config", "commands", "execution");
+  const config = loadExecutionConfig(configPath);
+  const command = resolveExecutionCommand(config, "test");
+  const processResult = await runBoundedProcess(command.argv);
+  const source = projectionSource(processResult.stdout, processResult.stderr);
+  const view =
+    command.view ??
+    (processResult.exitCode === 0 && processResult.signal === null ? "test-result-summary" : "test-result-failures");
+  try {
+    const result = createBuiltinProjectionCore().project({
+      source: { content: source, identity: "suzukuri test producer", mediaType: "text/plain" },
+      adapter: command.adapter ?? "vitest",
+      view,
+      budget: createBudget(command.budget ?? 8 * 1024),
+      renderer: "json",
+    });
+    if (outputFormat(parsed) === "text") {
+      printText(renderedText(result.output));
+    } else {
+      printText(renderedText(result.output));
+    }
+    return processResultExitCode(processResult);
+  } catch (error) {
+    if (processResult.exitCode !== 0 || processResult.signal !== null) {
+      printError(
+        new ExecutionError("EXECUTION_OUTPUT_UNSUPPORTED", {
+          command: "test",
+          truncated: processResult.truncated,
+          reason: errorCode(error),
+        }),
+        outputFormat(parsed),
+      );
+      return processResultExitCode(processResult);
+    }
+    throw new ExecutionError("EXECUTION_OUTPUT_UNSUPPORTED", {
+      command: "test",
+      truncated: processResult.truncated,
+      reason: errorCode(error),
+    });
+  }
+}
+
+function projectionSource(stdout: string, stderr: string): string {
+  const trimmedStdout = stdout.trim();
+  if (trimmedStdout.startsWith("{") || trimmedStdout.startsWith("[")) return stdout;
+  return [stdout, stderr].filter((value) => value.length > 0).join("\n");
+}
+
+function errorCode(error: unknown): string {
+  return typeof error === "object" && error !== null && "code" in error ? String(error.code) : "PROJECTION_FAILED";
 }
 
 function runProfileCommand(parsed: ParsedArguments): number {
@@ -389,6 +453,7 @@ function printHelp(): void {
       "Usage: suzukuri <command> [options]",
       "",
       "Commands:",
+      "  test [--config path]",
       "  profile list [--profiles path]",
       "  profile show <name> [--profiles path]",
       "  profile validate [--profiles path]",

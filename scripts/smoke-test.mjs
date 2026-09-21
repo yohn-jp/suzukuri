@@ -178,6 +178,23 @@ function main() {
           fail(`installed project returned an unexpected result: ${projectResult.stdout}`);
         }
 
+        const testProducer = path.join(profileDirectory, "test-producer.mjs");
+        const testConfig = path.join(profileDirectory, "commands.json");
+        fs.writeFileSync(
+          testProducer,
+          "console.log('TAP version 13\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# duration_ms 1');\n",
+        );
+        fs.writeFileSync(
+          testConfig,
+          JSON.stringify({ schemaVersion: 1, commands: { test: [process.execPath, testProducer] } }),
+        );
+        console.log(`running ${name} test through its installed launcher...`);
+        const testResult = run(launcher, ["test", "--config", testConfig], { cwd: installDirectory });
+        const testOutput = JSON.parse(testResult.stdout);
+        if (testOutput.status !== "passed" || testOutput.counts?.total !== 1) {
+          fail(`installed test returned an unexpected result: ${testResult.stdout}`);
+        }
+
         const callerScript = path.join(installDirectory, "external-caller.mjs");
         fs.writeFileSync(
           callerScript,
