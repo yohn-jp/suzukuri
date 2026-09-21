@@ -17,5 +17,5 @@ jobs:
     uses: yohn-jp/.github/.github/workflows/typescript-cli-ci.yml@4fb520dcfc63f386a2e33d6c0a74f251f8dc9bdb
     with:
       working-directory: .
-      node-version: "22"
+      node-version: "24"
       conformance-script: "test:package"
