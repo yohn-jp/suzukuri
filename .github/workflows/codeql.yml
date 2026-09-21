@@ -1,5 +1,10 @@
 name: CodeQL
 
+# Canonical wrapper distributed via .github/sync.yml (SKIP_PR: true, direct
+# push) — do not hand-edit in a consumer repository; edit this file in
+# yohn-jp/.github instead. Requires a CodeQL config at
+# ./.github/codeql/codeql-config.yml in the consuming repository.
+
 on:
   push:
     branches: [main]
@@ -8,16 +13,15 @@ on:
   schedule:
     - cron: "31 3 * * 1"
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   analyze:
+    uses: yohn-jp/.github/.github/workflows/codeql.yml@main
+    with:
+      languages: "javascript-typescript,actions"
+      config-file: ./.github/codeql/codeql-config.yml
     permissions:
       contents: read
       security-events: write
       actions: read
-    uses: yohn-jp/.github/.github/workflows/codeql.yml@4fb520dcfc63f386a2e33d6c0a74f251f8dc9bdb
-    with:
-      languages: "javascript-typescript,actions"
-      config-file: ".github/codeql/codeql-config.yml"
