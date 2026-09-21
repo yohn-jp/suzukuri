@@ -10,6 +10,7 @@ import {
   runBoundedProcess,
 } from "./execution.js";
 import { createProfileCore } from "./profile-builtins.js";
+import { runDiffCommand } from "./diff-command.js";
 import { runVerifyCommand } from "./verify-command.js";
 import {
   DEFAULT_PROFILE_PATH,
@@ -86,6 +87,9 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     if (command === "project") {
       return runProjectCommand(parsed);
+    }
+    if (command === "diff") {
+      return runDiffCommand({ positionals: parsed.positionals.slice(1), options: parsed.options });
     }
     if (command === "inspect") {
       return runInspectionCommand(parsed, parsed.positionals[1]);
@@ -463,6 +467,7 @@ function printHelp(): void {
       "  profile validate [--profiles path]",
       "  profile run <name> --input <path|-> [--profiles path]",
       "  project --adapter <id> --view <id> --budget <bytes> --renderer <id> --input <path|-> [--contract <id>]",
+      "  diff [--scope worktree|staged|all] [--view summary|files|hunks] [--budget bytes] [--path path]",
       "  verify [--config path] [--format json|text]",
       "  adapters | views | contracts | renderers",
       "  inspect <adapters|views|contracts|renderers>",

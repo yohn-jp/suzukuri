@@ -195,6 +195,27 @@ function main() {
           fail(`installed test returned an unexpected result: ${testResult.stdout}`);
         }
 
+        const diffDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-diff-smoke-"));
+        try {
+          run("git", ["init", "--quiet"], { cwd: diffDirectory });
+          run("git", ["config", "user.email", "suzukuri@example.invalid"], { cwd: diffDirectory });
+          run("git", ["config", "user.name", "Suzukuri Smoke Test"], { cwd: diffDirectory });
+          fs.writeFileSync(path.join(diffDirectory, "tracked.ts"), "export const value = 1;\n");
+          run("git", ["add", "tracked.ts"], { cwd: diffDirectory });
+          run("git", ["commit", "--quiet", "-m", "initial"], { cwd: diffDirectory });
+          fs.writeFileSync(path.join(diffDirectory, "tracked.ts"), "export const value = 2;\n");
+          console.log(`running ${name} diff through its installed launcher...`);
+          const diffResult = run(launcher, ["diff", "--view", "files", "--budget", "4096"], {
+            cwd: diffDirectory,
+          });
+          const diffOutput = JSON.parse(diffResult.stdout);
+          if (typeof diffOutput.output !== "string" || !diffOutput.output.includes("tracked.ts")) {
+            fail(`installed diff returned an unexpected result: ${diffResult.stdout}`);
+          }
+        } finally {
+          fs.rmSync(diffDirectory, { recursive: true, force: true });
+        }
+
         const verifyProducer = path.join(profileDirectory, "verify-producer.mjs");
         const verifyConfig = path.join(profileDirectory, "verify-commands.json");
         fs.writeFileSync(
