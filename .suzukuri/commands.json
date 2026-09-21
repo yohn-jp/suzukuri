@@ -1,0 +1,9 @@
+{
+  "$schema": "suzukuri/execution/v1",
+  "schemaVersion": 1,
+  "commands": {
+    "test": {
+      "argv": ["node", "--test", "--test-reporter=tap", "--import", "tsx", "src/**/*.test.ts", "scripts/**/*.test.mjs"]
+    }
+  }
+}
