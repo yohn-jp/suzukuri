@@ -46,6 +46,168 @@ test("unknown command exits 1", async () => {
   }
 });
 
+test("--help=full prints the complete command and option reference", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["--help=full"]);
+    assert.equal(exitCode, 0);
+    const output = lines.join("\n");
+    assert.match(output, /inspect <adapters\|views\|contracts\|renderers>/);
+    assert.match(output, /skill \[scenario\] \[--json\]/);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("--help=json prints machine-readable discovery", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["--help=json"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(lines.pop() ?? "{}") as { usage: string; domains: Array<{ domain: string }> };
+    assert.equal(result.usage, "suzukuri <command> [options]");
+    assert.ok(result.domains.some((entry) => entry.domain === "skill"));
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("profile --help prints that domain's operations", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["profile", "--help"]);
+    assert.equal(exitCode, 0);
+    const output = lines.join("\n");
+    assert.match(output, /Usage: suzukuri profile <command> \[options\]/);
+    assert.match(output, /profile show <name>/);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("profile show --help prints that leaf command's usage and example", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["profile", "show", "--help"]);
+    assert.equal(exitCode, 0);
+    const output = lines.join("\n");
+    assert.match(output, /Usage: suzukuri profile show <name>/);
+    assert.match(output, /Example:/);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill --help lists scenarios instead of falling back to root help", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["skill", "--help"]);
+    assert.equal(exitCode, 0);
+    const output = lines.join("\n");
+    assert.match(output, /Usage: suzukuri skill \[scenario\] \[--json\]/);
+    assert.match(output, /skill bounded-implementation/);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill <scenario> --help prints that scenario's summary", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["skill", "git-isolation", "--help"]);
+    assert.equal(exitCode, 0);
+    const output = lines.join("\n");
+    assert.match(output, /Usage: suzukuri skill git-isolation \[--json\]/);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("--version prints a namespaced version string", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["--version"]);
+    assert.equal(exitCode, 0);
+    assert.match(lines.join("\n"), /^suzukuri \d+\.\d+\.\d+$/);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("--diagnose reports standalone runtime readiness as JSON", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["--diagnose"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(lines.pop() ?? "{}") as { ready: boolean; name: string };
+    assert.equal(result.ready, true);
+    assert.equal(result.name, "suzukuri");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill with no scenario lists bounded operational playbooks as JSON by default", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["skill"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(lines.pop() ?? "{}") as { scenarios: Array<{ id: string; summary: string }> };
+    assert.ok(result.scenarios.some((scenario) => scenario.id === "bounded-implementation"));
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill <scenario> prints that scenario's playbook", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["skill", "git-isolation"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(lines.pop() ?? "{}") as { id: string; steps: string[] };
+    assert.equal(result.id, "git-isolation");
+    assert.ok(result.steps.length > 0);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill <unknown scenario> exits 1 with a stable error code", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.log = () => {};
+  console.error = (msg: string) => errors.push(msg);
+  try {
+    const exitCode = await runCli(["skill", "bogus-scenario"]);
+    assert.equal(exitCode, 1);
+    assert.match(errors.join("\n"), /SKILL_SCENARIO_NOT_FOUND/);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+});
+
 test("missing --input exits 1", async () => {
   const originalLog = console.log;
   const originalError = console.error;

@@ -14,6 +14,16 @@ import {
   runProfile,
   validateProfileFile,
 } from "./profiles.js";
+import { findSkillScenario, listSkillScenarios, SkillScenarioNotFoundError } from "./skill.js";
+import {
+  type CommandDefinition,
+  type CommandDomain,
+  DOMAIN_SUMMARIES,
+  getCommandForPositionals,
+  getDomainCommands,
+  getDomainDescription,
+  SUZUKURI_COMMANDS,
+} from "./command-contract.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
@@ -47,26 +57,35 @@ export async function runCli(argv: string[]): Promise<number> {
 
   if (command === undefined) {
     if (hasOption(parsed, "version")) {
-      console.log(getVersion());
+      printVersion();
       return 0;
     }
-    printHelp();
+    if (hasOption(parsed, "diagnose", "doctor")) {
+      printDiagnose();
+      return 0;
+    }
+    printHelpFor(parsed.positionals, parsed.options.help);
     return hasOption(parsed, "help") ? 0 : 1;
   }
 
   if (command === "--help" || command === "-h") {
-    printHelp();
+    printHelpFor([], true);
     return 0;
   }
 
   if (command === "--version" || command === "-v") {
-    console.log(getVersion());
+    printVersion();
+    return 0;
+  }
+
+  if (command === "--diagnose" || command === "--doctor") {
+    printDiagnose();
     return 0;
   }
 
   try {
     if (hasOption(parsed, "help", "h")) {
-      printHelp();
+      printHelpFor(parsed.positionals, parsed.options.help);
       return 0;
     }
     if (command === "test") {
@@ -99,9 +118,12 @@ export async function runCli(argv: string[]): Promise<number> {
     if (command === "renderers" || command === "renderer") {
       return runInspectionCommand(parsed, "renderers");
     }
+    if (command === "skill") {
+      return runSkillCommand(parsed);
+    }
 
-    console.error(`unknown command: ${command}`);
-    printHelp();
+    console.error(`unsupported command: ${command}`);
+    printHelpFor([], true);
     return 1;
   } catch (error) {
     let format: OutputFormat = "json";
@@ -240,6 +262,30 @@ function runInspectionCommand(parsed: ParsedArguments, requestedKind: string | u
   return 0;
 }
 
+function runSkillCommand(parsed: ParsedArguments): number {
+  const scenarioId = parsed.positionals[1];
+  const asJson = hasOption(parsed, "json") || outputFormat(parsed) === "json";
+  if (scenarioId === undefined) {
+    const scenarios = listSkillScenarios();
+    if (asJson) {
+      printJson({ scenarios: scenarios.map((scenario) => ({ id: scenario.id, summary: scenario.summary })) });
+    } else {
+      printText(scenarios.map((scenario) => `${scenario.id}\t${scenario.summary}`).join("\n"));
+    }
+    return 0;
+  }
+  const scenario = findSkillScenario(scenarioId);
+  if (scenario === undefined) {
+    throw new SkillScenarioNotFoundError(scenarioId);
+  }
+  if (asJson) {
+    printJson(scenario);
+  } else {
+    printText([`${scenario.id}: ${scenario.summary}`, "", ...scenario.steps.map((step) => `- ${step}`)].join("\n"));
+  }
+  return 0;
+}
+
 function normalizeInspectionKind(value: string | undefined): InspectionKind {
   switch (value) {
     case "adapters":
@@ -274,7 +320,7 @@ function inspectRuntime(kind: InspectionKind) {
 function parseArguments(argv: readonly string[]): ParsedArguments {
   const positionals: string[] = [];
   const options: Record<string, OptionValue> = {};
-  const knownBooleanOptions = new Set(["help", "version", "human"]);
+  const knownBooleanOptions = new Set(["help", "version", "human", "json", "diagnose", "doctor"]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "-") {
@@ -395,30 +441,166 @@ function printError(error: unknown, format: OutputFormat): void {
   }
 }
 
-function printHelp(): void {
+const FULL_OPTION_REFERENCE: readonly string[] = [
+  "--help[=full|json]  Print progressive help; use --help=full for the complete reference or --help=json for discovery.",
+  "--json  Emit structured JSON output (skill).",
+  "--format json|text  JSON is the stable automation contract (default: json).",
+  "--human  Use human-readable output.",
+  "--version  Print version and runtime contract metadata.",
+  "--diagnose  Check standalone runtime readiness.",
+  "--doctor  Alias for --diagnose.",
+];
+
+/**
+ * Dispatches to root, domain, or leaf help from the same command table used
+ * by execution dispatch, so `suzukuri <domain> --help` and
+ * `suzukuri <domain> <command> --help` are always accurate.
+ */
+function printHelpFor(positionals: readonly string[], helpValue: string | boolean | undefined): void {
+  if (helpValue === "json") return printJson(projectCommandHelp(positionals));
+  if (helpValue === "full") return printFullHelp();
+  const domain = positionals[0] as CommandDomain | undefined;
+  if (domain === undefined) return printRootHelp();
+  if (domain === "skill") return printSkillHelp(positionals[1]);
+  const definition = getCommandForPositionals(positionals);
+  const domainCommands = getDomainCommands(domain);
+  if (domainCommands.length === 0) return printRootHelp();
+  if (definition !== undefined && (definition.positionalSyntax === undefined || positionals.length > 1)) {
+    return printLeafHelp(definition);
+  }
+  return printDomainHelp(domain);
+}
+
+function printSkillHelp(scenarioId: string | undefined): void {
+  if (scenarioId !== undefined) {
+    const scenario = findSkillScenario(scenarioId);
+    if (scenario !== undefined) {
+      console.log(
+        [`Usage: suzukuri skill ${scenario.id} [--json]`, "", scenario.summary, "", "Run `suzukuri skill` for the full scenario list."].join(
+          "\n",
+        ),
+      );
+      return;
+    }
+  }
+  const lines = listSkillScenarios().map((scenario) => `  skill ${scenario.id} [--json]  - ${scenario.summary}`);
+  console.log(
+    [
+      "Usage: suzukuri skill [scenario] [--json]",
+      "",
+      getDomainDescription("skill") ?? "",
+      "",
+      "Scenarios:",
+      ...lines,
+      "",
+      "Run `suzukuri skill <scenario> --json` for that scenario's full steps.",
+    ].join("\n"),
+  );
+}
+
+function printRootHelp(): void {
+  const lines = DOMAIN_SUMMARIES.map(({ domain, description }) => `  ${domain.padEnd(10)} ${description}`);
+  console.log(
+    [
+      "Usage: suzukuri <command> [options]",
+      "",
+      "Domains:",
+      ...lines,
+      "",
+      "Run `suzukuri <domain> --help` for that domain's operations.",
+      "Run `suzukuri --help=full` for the complete command and option reference.",
+      "Run `suzukuri --version` or `suzukuri --diagnose` for machine-readable runtime checks.",
+    ].join("\n"),
+  );
+}
+
+function printDomainHelp(domain: CommandDomain): void {
+  const commands = getDomainCommands(domain);
+  const lines = commands.map((entry) => `  ${entry.usage}`);
+  console.log(
+    [
+      `Usage: suzukuri ${domain} <command> [options]`,
+      "",
+      getDomainDescription(domain) ?? "",
+      "",
+      "Operations:",
+      ...lines,
+      "",
+      `Run \`suzukuri ${domain} <command> --help\` for that command's inputs and an example.`,
+    ].join("\n"),
+  );
+}
+
+function printLeafHelp(command: CommandDefinition): void {
+  console.log(
+    [
+      `Usage: suzukuri ${command.usage}`,
+      "",
+      command.summary,
+      "",
+      "Example:",
+      `  ${command.example}`,
+      "",
+      "Run `suzukuri --help=full` for the complete option reference.",
+    ].join("\n"),
+  );
+}
+
+function printFullHelp(): void {
+  const commands = SUZUKURI_COMMANDS.filter((entry) => entry.id !== "skill.scenario").map(
+    (entry) => `  ${entry.usage}`,
+  );
   console.log(
     [
       "Usage: suzukuri <command> [options]",
       "",
       "Commands:",
-      "  test [--config path]",
-      "  profile list [--profiles path]",
-      "  profile show <name> [--profiles path]",
-      "  profile validate [--profiles path]",
-      "  profile run <name> --input <path|-> [--profiles path]",
-      "  project --adapter <id> --view <id> --budget <bytes> --renderer <id> --input <path|-> [--contract <id>]",
-      "  diff [--scope worktree|staged|all] [--view summary|files|hunks] [--budget bytes] [--path path]",
-      "  verify [--config path] [--format json|text]",
-      "  adapters | views | contracts | renderers",
-      "  inspect <adapters|views|contracts|renderers>",
+      ...commands,
       "",
       "Options:",
-      "  --format json|text   JSON is the stable automation contract (default: json)",
-      "  --human              Use human-readable output",
-      "  --help               Show this help",
-      "  --version            Print the installed version",
+      ...FULL_OPTION_REFERENCE.map((line) => `  ${line}`),
     ].join("\n"),
   );
+}
+
+function projectCommandHelp(positionals: readonly string[]): unknown {
+  const domain = positionals[0] as CommandDomain | undefined;
+  if (domain === undefined) {
+    return {
+      usage: "suzukuri <command> [options]",
+      domains: DOMAIN_SUMMARIES,
+      options: FULL_OPTION_REFERENCE,
+    };
+  }
+  if (domain === "skill") {
+    const scenarioId = positionals[1];
+    if (scenarioId !== undefined) {
+      const scenario = findSkillScenario(scenarioId);
+      if (scenario !== undefined) return scenario;
+    }
+    return { domain, description: getDomainDescription("skill"), scenarios: listSkillScenarios() };
+  }
+  const definition = getCommandForPositionals(positionals);
+  if (definition !== undefined && (definition.positionalSyntax === undefined || positionals.length > 1)) {
+    return definition;
+  }
+  const commands = getDomainCommands(domain);
+  if (commands.length === 0) {
+    return {
+      usage: "suzukuri <command> [options]",
+      domains: DOMAIN_SUMMARIES,
+      options: FULL_OPTION_REFERENCE,
+    };
+  }
+  return { domain, description: getDomainDescription(domain), commands };
+}
+
+function printVersion(): void {
+  console.log(`suzukuri ${getVersion()}`);
+}
+
+function printDiagnose(): void {
+  console.log(stableJsonStringify({ ready: true, name: "suzukuri", version: getVersion() }));
 }
 
 function getVersion(): string {

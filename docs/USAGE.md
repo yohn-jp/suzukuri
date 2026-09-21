@@ -65,6 +65,32 @@ suzukuri adapters
 suzukuri views
 ```
 
+## Skill playbooks
+
+`suzukuri skill` lists bounded operational playbooks derived from the repository's AGENTS.md execution contract; `suzukuri skill <scenario>` prints that scenario's steps. Like every other command, output is JSON by default and `--human`/`--format text` selects presentation-only text:
+
+```bash
+suzukuri skill
+suzukuri skill bounded-implementation
+suzukuri skill git-isolation --human
+```
+
+## Progressive help and runtime checks
+
+Help is wired at every command depth from one command table (`src/command-contract.ts`), the same table execution dispatch reads, so a command can never exist without being documented or vice versa:
+
+```bash
+suzukuri --help                  # domain overview
+suzukuri profile --help          # that domain's operations
+suzukuri profile show --help     # that leaf command's usage and example
+suzukuri skill --help            # skill scenario list
+suzukuri skill git-isolation --help  # one scenario's summary
+suzukuri --help=full             # the complete command and option reference
+suzukuri --help=json             # the same reference as machine-readable JSON
+```
+
+`suzukuri --version` prints a namespaced version string, and `suzukuri --diagnose` (alias `--doctor`) reports standalone runtime readiness as JSON.
+
 The TypeScript entry point exports `parseProfileDocument`, `resolveProfile`, `runProfile`, `createProfileCore`, and the inspection helpers used by these commands. The caller supplies the source body to `runProfile`; the same `ProjectionCore` and registries are used for profile and low-level projection.
 
 ## Product boundary and loss semantics
