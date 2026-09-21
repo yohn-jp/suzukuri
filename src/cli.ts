@@ -11,6 +11,7 @@ import {
 } from "./execution.js";
 import { createProfileCore } from "./profile-builtins.js";
 import { runDiffCommand } from "./diff-command.js";
+import { runVerifyCommand } from "./verify-command.js";
 import {
   DEFAULT_PROFILE_PATH,
   type InspectionKind,
@@ -77,6 +78,9 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     if (command === "test") {
       return await runTestCommand(parsed);
+    }
+    if (command === "verify") {
+      return await runVerifyCommand({ positionals: parsed.positionals.slice(1), options: parsed.options });
     }
     if (command === "profile" || command === "profiles") {
       return runProfileCommand(parsed);
@@ -464,6 +468,7 @@ function printHelp(): void {
       "  profile run <name> --input <path|-> [--profiles path]",
       "  project --adapter <id> --view <id> --budget <bytes> --renderer <id> --input <path|-> [--contract <id>]",
       "  diff [--scope worktree|staged|all] [--view summary|files|hunks] [--budget bytes] [--path path]",
+      "  verify [--config path] [--format json|text]",
       "  adapters | views | contracts | renderers",
       "  inspect <adapters|views|contracts|renderers>",
       "",

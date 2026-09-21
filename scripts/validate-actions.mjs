@@ -8,6 +8,7 @@ const ACTION_ROOTS = Object.freeze([".github/workflows", ".github/actions"]);
 const USES_LINE_PATTERN = /^\s*(?:-\s+)?uses:\s*(.*)$/u;
 const VALUE_PATTERN = /^(\S+)(?:\s+#.*)?$/u;
 const IMMUTABLE_EXTERNAL_ACTION_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$/u;
+const ORG_REUSABLE_WORKFLOW_PATTERN = /^yohn-jp\/\.github\/\.github\/workflows\/[^@]+@([^@]+)$/u;
 
 export function validateActionText(source, filePath = "<text>") {
   const references = [];
@@ -33,7 +34,23 @@ export function validateActionText(source, filePath = "<text>") {
     const reference = valueMatch[1];
     const local = reference.startsWith("./");
     references.push({ file: filePath, line: lineNumber, reference, local });
-    if (!local && !IMMUTABLE_EXTERNAL_ACTION_PATTERN.test(reference)) {
+    if (local) return;
+
+    const organizationWorkflow = reference.match(ORG_REUSABLE_WORKFLOW_PATTERN);
+    if (organizationWorkflow !== null) {
+      if (organizationWorkflow[1] !== "main") {
+        errors.push(
+          filePath +
+            ":" +
+            lineNumber +
+            ": organization-owned reusable workflow must use @main (third-party Actions remain SHA-pinned): " +
+            reference,
+        );
+      }
+      return;
+    }
+
+    if (!IMMUTABLE_EXTERNAL_ACTION_PATTERN.test(reference)) {
       errors.push(
         filePath + ":" + lineNumber + ": external GitHub Action must use a full 40-character commit SHA: " + reference,
       );
