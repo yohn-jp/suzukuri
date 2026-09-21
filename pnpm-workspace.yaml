@@ -3,3 +3,21 @@
 # dependency of tsx) is a known-safe, widely used build tool.
 allowBuilds:
   esbuild: true
+
+# Policy (2026-09-21): this is our own product, so we accept freshly
+# published dependency releases immediately instead of waiting out pnpm's
+# default minimum-release-age safety window (the key belongs here, in
+# pnpm-workspace.yaml — NOT in .npmrc; minimum-release-age in .npmrc is a
+# different, no-op setting for this check). Do not re-ask about this each
+# update round.
+minimumReleaseAge: 0
+
+# Dependency pinning policy (2026-09-21): keep every dependency at latest
+# except where a concrete, checked incompatibility blocks it. Do not
+# re-derive this each update round; update the note below instead when
+# the blocking condition changes.
+#
+# - typescript: pinned to ^6.0.3 in package.json. typescript-eslint@8.70.0
+#   declares a peer range of ">=4.8.4 <6.1.0", so typescript@7.x is
+#   unsupported by our lint toolchain today. Re-check when typescript-eslint
+#   raises its peer ceiling past 7.x, then bump both together.
