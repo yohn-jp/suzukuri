@@ -201,6 +201,32 @@ export function getCommand(id: string): CommandDefinition | undefined {
   return commandsById.get(id);
 }
 
+function requiredCommand(id: string): CommandDefinition {
+  const command = getCommand(id);
+  if (command === undefined) {
+    throw new Error(`Unknown command contract: ${id}`);
+  }
+  return command;
+}
+
+export function commandInvocation(id: string, positional?: string): string {
+  const invocation = `suzukuri ${requiredCommand(id).path.join(" ")}`;
+  return positional === undefined ? invocation : `${invocation} ${positional}`;
+}
+
+export function commandUsage(id: string): string {
+  return `suzukuri ${requiredCommand(id).usage}`;
+}
+
+export function commandExample(id: string): string {
+  return requiredCommand(id).example;
+}
+
+export function commandHelpPointer(id: string): string {
+  const command = requiredCommand(id);
+  return `suzukuri ${command.domain} --help`;
+}
+
 /**
  * Resolves positionals to the command definition that both execution
  * dispatch and help share, so the two can never disagree about what a

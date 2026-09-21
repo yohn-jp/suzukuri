@@ -163,30 +163,73 @@ test("--diagnose reports standalone runtime readiness as JSON", async () => {
   }
 });
 
-test("skill with no scenario lists bounded operational playbooks as JSON by default", async () => {
+test("skill with no scenario lists a bounded human-readable index by default", async () => {
   const originalLog = console.log;
   const lines: string[] = [];
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["skill"]);
     assert.equal(exitCode, 0);
-    const result = JSON.parse(lines.pop() ?? "{}") as { scenarios: Array<{ id: string; summary: string }> };
-    assert.ok(result.scenarios.some((scenario) => scenario.id === "bounded-implementation"));
+    const output = lines.join("\n");
+    assert.match(output, /^Suzukuri skill scenarios \(v\d+\.\d+\.\d+\):/);
+    assert.match(output, /bounded-implementation - Follow a bounded implementation/);
+    assert.match(output, /repository-operation - Use a registered repository operation/);
   } finally {
     console.log = originalLog;
   }
 });
 
-test("skill <scenario> prints that scenario's playbook", async () => {
+test("skill --json lists the versioned structured index", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["skill", "--json"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(lines.pop() ?? "{}") as {
+      version: string;
+      scenarios: Array<{ id: string; title: string; scope: string }>;
+    };
+    assert.match(result.version, /^\d+\.\d+\.\d+$/);
+    assert.equal(result.scenarios.find((scenario) => scenario.id === "repository-operation")?.scope, "leaf-operation");
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill <scenario> prints that scenario's human playbook", async () => {
   const originalLog = console.log;
   const lines: string[] = [];
   console.log = (line: string) => lines.push(line);
   try {
     const exitCode = await runCli(["skill", "git-isolation"]);
     assert.equal(exitCode, 0);
-    const result = JSON.parse(lines.pop() ?? "{}") as { id: string; steps: string[] };
-    assert.equal(result.id, "git-isolation");
-    assert.ok(result.steps.length > 0);
+    const output = lines.join("\n");
+    assert.match(output, /Keep implementation work isolated \(git-isolation\)/);
+    assert.match(output, /When to use:/);
+    assert.match(output, /Workflow:/);
+    assert.match(output, /Canonical entrypoint: suzukuri skill/);
+    assert.match(output, /Exact syntax: suzukuri skill --help/);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test("skill <scenario> --json prints the same structured playbook", async () => {
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["skill", "repository-operation", "--json"]);
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(lines.pop() ?? "{}") as {
+      id: string;
+      canonicalCommandId: string;
+      workflow: Array<{ commandId: string; command: string }>;
+    };
+    assert.equal(result.id, "repository-operation");
+    assert.equal(result.canonicalCommandId, "run");
+    assert.ok(result.workflow.every((step) => step.commandId === "run" && step.command === "suzukuri run build"));
   } finally {
     console.log = originalLog;
   }
