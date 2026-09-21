@@ -33,7 +33,27 @@ test("rejects mutable, incomplete, and missing external action refs", () => {
   assert.match(result.errors[2], /same line/u);
 });
 
-test("all repository-owned workflow and composite-action refs are pinned", () => {
+test("accepts yohn-jp/.github reusable workflows pinned at @main", () => {
+  const result = validateActionText(
+    "    uses: yohn-jp/.github/.github/workflows/typescript-cli-ci.yml@main",
+    ".github/workflows/example.yml",
+  );
+
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.references.length, 1);
+});
+
+test("rejects yohn-jp/.github reusable workflows not pinned at @main", () => {
+  const result = validateActionText(
+    "    uses: yohn-jp/.github/.github/workflows/typescript-cli-ci.yml@" + sha,
+    ".github/workflows/example.yml",
+  );
+
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /organization-owned reusable workflow must use @main/u);
+});
+
+test("all repository-owned workflow and composite-action refs follow the organization pin policy", () => {
   const result = validateRepositoryActions(repositoryRoot);
 
   assert.deepEqual(result.errors, []);
