@@ -33,62 +33,74 @@ export async function runTestCommand(parsed: TestCommandArguments): Promise<numb
     return processResultExitCode(lookup.cached);
   }
 
-  const processResult = isSteppedExecutionCommand(command)
+  const outcome = isSteppedExecutionCommand(command)
     ? await runSteppedTest(command.steps)
-    : await runBoundedProcess(command.argv);
-  const stepView = isSteppedExecutionCommand(command) ? undefined : command.view;
-  const stepAdapter = isSteppedExecutionCommand(command) ? undefined : command.adapter;
-  const stepBudget = isSteppedExecutionCommand(command) ? undefined : command.budget;
-  const source = projectionSource(processResult.stdout, processResult.stderr);
+    : {
+        ...(await runBoundedProcess(command.argv)),
+        adapter: command.adapter,
+        view: command.view,
+        budget: command.budget,
+      };
+  const source = projectionSource(outcome.stdout, outcome.stderr);
   const view =
-    stepView ??
-    (processResult.exitCode === 0 && processResult.signal === null ? "test-result-summary" : "test-result-failures");
+    outcome.view ??
+    (outcome.exitCode === 0 && outcome.signal === null ? "test-result-summary" : "test-result-failures");
   try {
     const result = createBuiltinProjectionCore().project({
       source: { content: source, identity: "suzukuri test producer", mediaType: "text/plain" },
-      adapter: stepAdapter ?? "vitest",
+      adapter: outcome.adapter ?? "vitest",
       view,
-      budget: createBudget(stepBudget ?? 8 * 1024),
+      budget: createBudget(outcome.budget ?? 8 * 1024),
       renderer: "json",
     });
     const printed = renderedText(result.output);
     if (lookup !== undefined) {
       await lookup.commit({
-        exitCode: processResult.exitCode,
-        signal: processResult.signal,
+        exitCode: outcome.exitCode,
+        signal: outcome.signal,
         printed: JSON.parse(printed) as unknown,
       });
     }
     printText(printed);
-    return processResultExitCode(processResult);
+    return processResultExitCode(outcome);
   } catch (error) {
-    if (processResult.exitCode !== 0 || processResult.signal !== null) {
+    if (outcome.exitCode !== 0 || outcome.signal !== null) {
       printError(
         new ExecutionError("EXECUTION_OUTPUT_UNSUPPORTED", {
           command: "test",
-          truncated: processResult.truncated,
+          truncated: outcome.truncated,
           reason: errorCode(error),
         }),
         outputFormat(parsed),
       );
-      return processResultExitCode(processResult);
+      return processResultExitCode(outcome);
     }
     throw new ExecutionError("EXECUTION_OUTPUT_UNSUPPORTED", {
       command: "test",
-      truncated: processResult.truncated,
+      truncated: outcome.truncated,
       reason: errorCode(error),
     });
   }
 }
 
+interface TestStepOutcome extends BoundedProcessResult {
+  readonly adapter: string | undefined;
+  readonly view: string | undefined;
+  readonly budget: number | undefined;
+}
+
 /**
  * Runs a stepped test command sequentially, stopping at the first
- * failed/signaled step. Only that step's output is projected: later steps
- * never ran, and earlier steps already passed.
+ * failed/signaled step. Only that step's output (and its own declared
+ * adapter/view/budget) is projected: on failure, later steps never ran; on
+ * success, only the final step is expected to be test-runner output that a
+ * `test-result-*` view can parse — earlier steps are pass/fail gates, not
+ * projectable test results.
  */
-async function runSteppedTest(steps: Parameters<typeof runBoundedCommandSteps>[0]): Promise<BoundedProcessResult> {
+async function runSteppedTest(steps: Parameters<typeof runBoundedCommandSteps>[0]): Promise<TestStepOutcome> {
   const result = await runBoundedCommandSteps(steps);
   const outcome = result.failedStep ?? result.steps[result.steps.length - 1];
+  const definition = steps.find((step) => step.name === outcome.name);
   return {
     argv: outcome.argv,
     exitCode: outcome.exitCode,
@@ -96,6 +108,9 @@ async function runSteppedTest(steps: Parameters<typeof runBoundedCommandSteps>[0
     stdout: outcome.stdout,
     stderr: outcome.stderr,
     truncated: outcome.truncated,
+    adapter: definition?.adapter,
+    view: definition?.view,
+    budget: definition?.budget,
   };
 }
 

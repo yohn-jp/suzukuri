@@ -363,11 +363,15 @@ function applyInitPlan(cwd: string, plan: InitPlan): void {
   const configPath = path.join(cwd, DEFAULT_EXECUTION_CONFIG_PATH);
   const packageJsonPath = path.join(cwd, "package.json");
   const packageJsonContent = readPackageJson(packageJsonPath);
+  // Recomputed from the just-read package.json rather than trusting
+  // plan.addDevDependency, which was decided before the confirmation prompt
+  // and could be stale if package.json changed in that window.
+  const addDevDependency = packageJsonContent.devDependencies?.suzukuri === undefined;
 
   const nextPackageJson: PackageJson = {
     ...packageJsonContent,
     scripts: { ...packageJsonContent.scripts, ...plan.packageJsonScriptChanges },
-    ...(plan.addDevDependency
+    ...(addDevDependency
       ? {
           devDependencies: {
             ...packageJsonContent.devDependencies,

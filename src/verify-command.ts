@@ -63,12 +63,17 @@ export async function runVerifyCommand(parsed: VerifyCommandArguments): Promise<
     return processResultExitCode(lookup.cached);
   }
 
-  const processResult = isSteppedExecutionCommand(command)
-    ? await runSteppedVerify(command.steps)
-    : await runBoundedProcess(command.argv, { maxOutputBytes: command.budget ?? DEFAULT_PROCESS_OUTPUT_LIMIT });
-  const diagnosticLimit = isSteppedExecutionCommand(command)
-    ? DEFAULT_VERIFY_DIAGNOSTIC_BYTES
-    : (command.budget ?? DEFAULT_VERIFY_DIAGNOSTIC_BYTES);
+  let processResult: VerifyProcessResult;
+  let diagnosticLimit: number;
+  if (isSteppedExecutionCommand(command)) {
+    processResult = await runSteppedVerify(command.steps);
+    diagnosticLimit = processResult.budget ?? DEFAULT_VERIFY_DIAGNOSTIC_BYTES;
+  } else {
+    processResult = await runBoundedProcess(command.argv, {
+      maxOutputBytes: command.budget ?? DEFAULT_PROCESS_OUTPUT_LIMIT,
+    });
+    diagnosticLimit = command.budget ?? DEFAULT_VERIFY_DIAGNOSTIC_BYTES;
+  }
   const result = createVerifyResult(processResult, diagnosticLimit);
   if (lookup !== undefined) {
     await lookup.commit({
@@ -93,13 +98,16 @@ interface VerifyProcessResult {
   readonly truncated: boolean;
   /** The structurally identified failing step name, when execution ran named steps. */
   readonly stage?: string;
+  /** The failing step's own declared budget, when execution ran named steps. */
+  readonly budget?: number;
 }
 
 /**
  * Runs a stepped verify command sequentially, stopping at the first
  * failed/signaled step. The failing step's declared name is carried as
  * `stage` directly from execution structure, so verify never has to infer it
- * from concatenated producer output.
+ * from concatenated producer output; its declared `budget` is carried the
+ * same way so the diagnostic bound reflects that step, not the default.
  */
 async function runSteppedVerify(steps: Parameters<typeof runBoundedCommandSteps>[0]): Promise<VerifyProcessResult> {
   const result = await runBoundedCommandSteps(steps);
@@ -108,6 +116,7 @@ async function runSteppedVerify(steps: Parameters<typeof runBoundedCommandSteps>
     const last = result.steps[result.steps.length - 1];
     return { exitCode: last.exitCode, signal: last.signal, stdout: "", stderr: "", truncated: false };
   }
+  const failedStepDefinition = steps.find((step) => step.name === failed.name);
   return {
     exitCode: failed.exitCode,
     signal: failed.signal,
@@ -115,6 +124,7 @@ async function runSteppedVerify(steps: Parameters<typeof runBoundedCommandSteps>
     stderr: failed.stderr,
     truncated: failed.truncated,
     stage: failed.name,
+    budget: failedStepDefinition?.budget,
   };
 }
 

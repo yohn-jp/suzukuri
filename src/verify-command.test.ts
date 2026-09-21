@@ -227,6 +227,45 @@ test("verify with ordered steps reports success once every step passes", async (
   }
 });
 
+test("verify with ordered steps bounds the diagnostic using the failing step's own declared budget", async () => {
+  const { directory, config } = fixture("suzukuri-verify-steps-budget-");
+  const okScript = path.join(directory, "ok.mjs");
+  const brokenScript = path.join(directory, "broken.mjs");
+  const lines: string[] = [];
+  const originalLog = console.log;
+  fs.writeFileSync(okScript, "process.exitCode = 0;\n");
+  fs.writeFileSync(brokenScript, "console.error('x'.repeat(100000)); process.exitCode = 1;\n");
+  const stepBudget = 64;
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: {
+        verify: {
+          steps: [
+            { name: "lint", argv: [process.execPath, okScript] },
+            { name: "typecheck", argv: [process.execPath, brokenScript], budget: stepBudget },
+          ],
+        },
+      },
+    }),
+  );
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(result.stage, "typecheck");
+    assert.ok(
+      Buffer.byteLength(String(result.diagnostic), "utf8") <= stepBudget,
+      `diagnostic must be bounded by the failing step's own ${String(stepBudget)}-byte budget`,
+    );
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a second unchanged verify invocation returns the prior bounded result without spawning the producer again", async () => {
   const { repository, directory, producer, config, counter } = gitFixture("suzukuri-verify-cache-hit-");
   const originalCwd = process.cwd();
