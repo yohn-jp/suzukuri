@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { InitCommandError, runInitCommand } from "./init-command.js";
 import { isSteppedExecutionCommand, parseExecutionConfig } from "./execution.js";
+import { runRunCommand } from "./run-command.js";
 
 function repository(prefix: string, packageJson: Record<string, unknown>): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -80,7 +81,7 @@ test("init imports the full script vocabulary (build/lint/format/test/verify) wi
       "format:check": "prettier --check .",
       typecheck: "tsc --noEmit",
       "governance:actions": "node scripts/validate-actions.mjs",
-      "test:package": "node scripts/run-package-suite.mjs",
+      "test:package": "pnpm run build && node scripts/run-package-suite.mjs",
       verify:
         "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run governance:actions && pnpm run test:package",
     },
@@ -110,7 +111,7 @@ test("init imports the full script vocabulary (build/lint/format/test/verify) wi
     const build = config.commands.build;
     assert.ok(build !== undefined && !isSteppedExecutionCommand(build));
     if (build !== undefined && !isSteppedExecutionCommand(build)) {
-      assert.deepEqual(build.argv, ["tsc", "-p", "tsconfig.build.json"]);
+      assert.deepEqual(build.argv, ["pnpm", "exec", "tsc", "-p", "tsconfig.build.json"]);
       assert.equal(build.projection, "generic");
     }
 
@@ -121,6 +122,7 @@ test("init imports the full script vocabulary (build/lint/format/test/verify) wi
       assert.deepEqual(testCommand.argv, [
         "node",
         "--test",
+        "--test-reporter=tap",
         "--import",
         "tsx",
         "src/**/*.test.ts",
@@ -130,6 +132,9 @@ test("init imports the full script vocabulary (build/lint/format/test/verify) wi
 
     const lint = config.commands.lint;
     assert.ok(lint !== undefined && !isSteppedExecutionCommand(lint) && lint.projection === "generic");
+    if (lint !== undefined && !isSteppedExecutionCommand(lint)) {
+      assert.deepEqual(lint.argv, ["pnpm", "exec", "eslint", "src/**/*.ts"]);
+    }
 
     const verifyCommand = config.commands.verify;
     assert.ok(verifyCommand !== undefined && isSteppedExecutionCommand(verifyCommand));
@@ -139,7 +144,17 @@ test("init imports the full script vocabulary (build/lint/format/test/verify) wi
         verifyCommand.steps.map((step) => step.name),
         ["format:check", "lint", "typecheck", "test", "governance:actions", "test:package"],
       );
-      assert.deepEqual(verifyCommand.steps[0].argv, ["pnpm", "run", "format:check"]);
+      assert.deepEqual(verifyCommand.steps[0].argv, ["pnpm", "exec", "prettier", "--check", "."]);
+      assert.deepEqual(verifyCommand.steps[3].argv, [
+        "node",
+        "--test",
+        "--test-reporter=tap",
+        "--import",
+        "tsx",
+        "src/**/*.test.ts",
+        "scripts/**/*.test.mjs",
+      ]);
+      assert.deepEqual(verifyCommand.steps[5].argv, ["pnpm", "run", "test:package"]);
     }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -172,6 +187,95 @@ test("init leaves an unparsable composite verify script unchanged and reports it
   }
 });
 
+test("init lowers migrated composite producers while preserving unresolved package scripts", async () => {
+  const directory = repository("suzukuri-init-composite-lowering-", {
+    name: "wabachi",
+    scripts: {
+      lint: "eslint .",
+      legacy: "echo $LEGACY",
+      verify: "pnpm run lint && pnpm run legacy",
+    },
+  });
+  try {
+    const { result: exitCode } = withCapturedLog(() =>
+      runInitCommand({ positionals: [], options: {} }, { cwd: directory, confirm: async () => true }),
+    );
+    assert.equal(await exitCode, 0);
+    const packageJson = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    assert.equal(packageJson.scripts.lint, undefined);
+    assert.equal(packageJson.scripts.verify, undefined);
+    assert.equal(packageJson.scripts.legacy, "echo $LEGACY");
+    const config = parseExecutionConfig(
+      JSON.parse(fs.readFileSync(path.join(directory, ".suzukuri", "commands.json"), "utf8")) as unknown,
+    );
+    const verify = config.commands.verify;
+    assert.ok(verify !== undefined && isSteppedExecutionCommand(verify));
+    if (verify !== undefined && isSteppedExecutionCommand(verify)) {
+      assert.deepEqual(verify.steps[0].argv, ["pnpm", "exec", "eslint", "."]);
+      assert.deepEqual(verify.steps[1].argv, ["pnpm", "run", "legacy"]);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("init leaves a Node test with an unsupported explicit reporter unmigrated", async () => {
+  const directory = repository("suzukuri-init-reporter-", {
+    name: "wabachi",
+    scripts: { test: "node --test --test-reporter=spec" },
+  });
+  try {
+    const { result: exitCode } = withCapturedLog(() =>
+      runInitCommand({ positionals: [], options: {} }, { cwd: directory, confirm: async () => true }),
+    );
+    assert.equal(await exitCode, 0);
+    const config = parseExecutionConfig(
+      JSON.parse(fs.readFileSync(path.join(directory, ".suzukuri", "commands.json"), "utf8")) as unknown,
+    );
+    assert.equal(config.commands.test, undefined);
+    const packageJson = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    assert.equal(packageJson.scripts.test, "node --test --test-reporter=spec");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("generated pnpm test and verify commands execute through the registry", async () => {
+  const directory = repository("suzukuri-init-integration-", {
+    name: "wabachi",
+    scripts: {
+      check: "node -e 0",
+      test: "node --test fixture.test.mjs",
+      verify: "pnpm run check && pnpm test",
+    },
+  });
+  fs.writeFileSync(
+    path.join(directory, "fixture.test.mjs"),
+    'import assert from "node:assert/strict";\nimport { test } from "node:test";\ntest("fixture", () => assert.equal(2 + 2, 4));\n',
+  );
+  const originalCwd = process.cwd();
+  const originalNodeTestContext = process.env.NODE_TEST_CONTEXT;
+  try {
+    const { result: initExitCode } = withCapturedLog(() =>
+      runInitCommand({ positionals: [], options: { yes: true } }, { cwd: directory }),
+    );
+    assert.equal(await initExitCode, 0);
+    process.chdir(directory);
+    delete process.env.NODE_TEST_CONTEXT;
+    assert.equal(await runRunCommand({ positionals: ["test"], options: {} }), 0);
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: {} }), 0);
+  } finally {
+    if (originalNodeTestContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = originalNodeTestContext;
+    process.chdir(originalCwd);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("re-running init on an already initialized repository is an explicit no-op", async () => {
   const directory = repository("suzukuri-init-idempotent-", {
     name: "wabachi",
@@ -181,7 +285,7 @@ test("re-running init on an already initialized repository is an explicit no-op"
   fs.mkdirSync(path.join(directory, ".suzukuri"));
   fs.writeFileSync(
     path.join(directory, ".suzukuri", "commands.json"),
-    JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["tsc"] } } }),
+    JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["pnpm", "exec", "tsc"] } } }),
   );
   try {
     const { result: exitCode, lines } = withCapturedLog(() =>
@@ -203,7 +307,7 @@ test("re-running init after adding a new script proposes only the new command, n
   fs.mkdirSync(path.join(directory, ".suzukuri"));
   fs.writeFileSync(
     path.join(directory, ".suzukuri", "commands.json"),
-    JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["tsc"] } } }),
+    JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["pnpm", "exec", "tsc"] } } }),
   );
   try {
     const { result: exitCode, lines } = withCapturedLog(() =>
@@ -260,13 +364,45 @@ test("init updates the lockfile so devDependencies.suzukuri is reflected without
     scripts: { build: "tsc" },
   });
   try {
+    const workspaceBefore = fs.readFileSync(path.join(directory, "pnpm-workspace.yaml"), "utf8");
     const { result: exitCode } = withCapturedLog(() =>
       runInitCommand({ positionals: [], options: {} }, { cwd: directory, confirm: async () => true }),
     );
     assert.equal(await exitCode, 0);
     const lockfile = fs.readFileSync(path.join(directory, "pnpm-lock.yaml"), "utf8");
-    assert.ok(lockfile.includes("suzukuri"), "the lockfile must be regenerated to include the new devDependency");
+    assert.ok(lockfile.includes("suzukuri"), "the lockfile must include the new devDependency");
+    assert.equal(fs.readFileSync(path.join(directory, "pnpm-workspace.yaml"), "utf8"), workspaceBefore);
   } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("init restores package and lockfile state when the targeted dependency update fails", async () => {
+  const directory = repository("suzukuri-init-lockfile-failure-", {
+    name: "wabachi",
+    scripts: { build: "tsc" },
+  });
+  const fakeBin = path.join(directory, "fake-bin");
+  fs.mkdirSync(fakeBin);
+  fs.writeFileSync(path.join(fakeBin, "pnpm"), "#!/usr/bin/env node\nprocess.exit(1);\n");
+  fs.chmodSync(path.join(fakeBin, "pnpm"), 0o755);
+  const originalPath = process.env.PATH;
+  try {
+    const packageBefore = fs.readFileSync(path.join(directory, "package.json"), "utf8");
+    const lockfileBefore = fs.readFileSync(path.join(directory, "pnpm-lock.yaml"), "utf8");
+    const workspaceBefore = fs.readFileSync(path.join(directory, "pnpm-workspace.yaml"), "utf8");
+    process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+    await assert.rejects(
+      () => runInitCommand({ positionals: [], options: { yes: true } }, { cwd: directory }),
+      (error: unknown) => error instanceof InitCommandError && error.code === "INIT_LOCKFILE_UPDATE_FAILED",
+    );
+    assert.equal(fs.readFileSync(path.join(directory, "package.json"), "utf8"), packageBefore);
+    assert.equal(fs.readFileSync(path.join(directory, "pnpm-lock.yaml"), "utf8"), lockfileBefore);
+    assert.equal(fs.readFileSync(path.join(directory, "pnpm-workspace.yaml"), "utf8"), workspaceBefore);
+    assert.equal(fs.existsSync(path.join(directory, ".suzukuri", "commands.json")), false);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -329,12 +465,12 @@ test("a stepped registry entry (e.g. verify) is recognized as already imported a
     JSON.stringify({
       schemaVersion: 1,
       commands: {
-        lint: { argv: ["eslint", "."] },
-        test: { argv: ["node", "--test"], projection: "test-result" },
+        lint: { argv: ["pnpm", "exec", "eslint", "."] },
+        test: { argv: ["node", "--test", "--test-reporter=tap"], projection: "test-result" },
         verify: {
           steps: [
-            { name: "lint", argv: ["pnpm", "run", "lint"] },
-            { name: "test", argv: ["pnpm", "test"] },
+            { name: "lint", argv: ["pnpm", "exec", "eslint", "."] },
+            { name: "test", argv: ["node", "--test", "--test-reporter=tap"] },
           ],
           projection: "verification-result",
         },

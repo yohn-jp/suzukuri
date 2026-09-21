@@ -172,16 +172,30 @@ function buildInitPlan(cwd: string): InitPlan {
   const existingConfig = readExistingConfig(cwd);
   const existingCommands = existingConfig?.commands ?? {};
 
+  const rawPlans = new Map<string, CommandPlan>();
+  const unresolvedReasons = new Map<string, string>();
+  for (const scriptName of Object.keys(scripts).sort()) {
+    const result = planForScript(scriptName, scripts[scriptName], scripts, packageManager);
+    if (result.ok) rawPlans.set(scriptName, result.plan);
+    else unresolvedReasons.set(scriptName, result.reason);
+  }
+
+  const resolvedPlans = resolveScriptPlans(rawPlans);
   const migrations: ScriptMigration[] = [];
   for (const scriptName of Object.keys(scripts).sort()) {
     const script = scripts[scriptName];
-    if (isAlreadyImported(existingCommands[scriptName], scriptName, script, scripts)) continue;
-    const plan = planForScript(scriptName, script, scripts);
+    const resolution = resolvedPlans.get(scriptName);
+    if (resolution?.plan !== undefined) {
+      if (isAlreadyImported(existingCommands[scriptName], scriptName, resolution.plan)) continue;
+      migrations.push({ scriptName, originalScript: script, plan: resolution.plan, unresolvedReason: undefined });
+      continue;
+    }
     migrations.push({
       scriptName,
       originalScript: script,
-      plan: plan.ok ? plan.plan : undefined,
-      unresolvedReason: plan.ok ? undefined : plan.reason,
+      plan: undefined,
+      unresolvedReason:
+        unresolvedReasons.get(scriptName) ?? resolution?.reason ?? "The script could not be migrated safely.",
     });
   }
 
@@ -206,7 +220,7 @@ function buildInitPlan(cwd: string): InitPlan {
   // unresolved (unresolvable) scripts are left in package.json untouched.
   const scriptsToRemove = Object.keys(scripts)
     .filter((scriptName) => !NPM_LIFECYCLE_SCRIPT_NAMES.has(scriptName))
-    .filter((scriptName) => commands[scriptName] !== undefined)
+    .filter((scriptName) => resolvedPlans.get(scriptName)?.plan !== undefined)
     .sort();
 
   const lifecycleRewrites = computeLifecycleRewrites(scripts, scriptsToRemove);
@@ -233,8 +247,8 @@ function buildInitPlan(cwd: string): InitPlan {
 
 /**
  * A script already represented in the registry under an unchanged shape is
- * not re-proposed, making re-runs idempotent. Compares against whichever
- * plan `planForScript` would currently produce for this script, so both
+ * not re-proposed, making re-runs idempotent. Compares against the normalized
+ * plan currently produced for this script, so both
  * single-argv and ordered-steps commands are recognized as already
  * imported rather than only the single-argv shape. Both sides are run
  * through `parseExecutionConfig`'s own normalization (which fills in
@@ -242,16 +256,9 @@ function buildInitPlan(cwd: string): InitPlan {
  * written with implicit defaults compares equal to a freshly generated one
  * that also relies on those same defaults.
  */
-function isAlreadyImported(
-  existing: unknown,
-  scriptName: string,
-  script: string,
-  scripts: Readonly<Record<string, string>>,
-): boolean {
+function isAlreadyImported(existing: unknown, scriptName: string, plan: CommandPlan): boolean {
   if (!isRecord(existing)) return false;
-  const result = planForScript(scriptName, script, scripts);
-  if (!result.ok) return false;
-  const candidate = commandPlanToConfig(result.plan);
+  const candidate = commandPlanToConfig(plan);
   const normalizedExisting = normalizeCommandForComparison(scriptName, existing);
   const normalizedCandidate = normalizeCommandForComparison(scriptName, candidate);
   if (normalizedExisting === undefined || normalizedCandidate === undefined) return false;
@@ -338,16 +345,16 @@ function projectionForName(scriptName: string): CommandPlan["projection"] {
 
 /**
  * Interprets an existing package script into a suzukuri command plan. A
- * simple script becomes a single producer; a `&&`-joined composite of
- * `pnpm run <script>` / `npm run <script>` segments becomes ordered steps
+ * simple script becomes a normalized single producer; a `&&`-joined composite
+ * of `pnpm run <script>` / `npm run <script>` segments becomes ordered steps
  * naming each referenced script. Anything else is reported unresolved rather
- * than guessed, per the issue's fail-closed requirement. Producer behavior
- * is preserved exactly — no new validation stage is invented.
+ * than guessed, per the issue's fail-closed requirement.
  */
 function planForScript(
   scriptName: string,
   script: string,
   scripts: Readonly<Record<string, string>>,
+  packageManager: "pnpm" | "npm",
 ): ScriptPlanResult {
   const projection = projectionForName(scriptName);
   const segments = splitTopLevelAnd(script);
@@ -359,7 +366,9 @@ function planForScript(
     if (argv === undefined) {
       return { ok: false, reason: "The script could not be tokenized safely into an argv array." };
     }
-    return { ok: true, plan: { kind: "single", argv, projection } };
+    const normalized = normalizeProducer(argv, packageManager, projection);
+    if (!normalized.ok) return normalized;
+    return { ok: true, plan: { kind: "single", argv: normalized.argv, projection } };
   }
   const steps: StepPlan[] = [];
   for (const segment of segments) {
@@ -383,6 +392,152 @@ function planForScript(
     steps.push({ name: referencedScript, argv });
   }
   return { ok: true, plan: { kind: "steps", steps, projection } };
+}
+
+interface ScriptPlanResolution {
+  readonly plan: CommandPlan | undefined;
+  readonly reason: string | undefined;
+}
+
+/**
+ * Resolves composite references only after all scripts have been classified.
+ * A migrated producer is inlined so removing its package script cannot leave
+ * a dead `pnpm run <name>` step. Scripts that remain unresolved or are
+ * lifecycle hooks keep their package-manager reference.
+ */
+function resolveScriptPlans(rawPlans: ReadonlyMap<string, CommandPlan>): ReadonlyMap<string, ScriptPlanResolution> {
+  const resolved = new Map<string, ScriptPlanResolution>();
+  const resolving = new Set<string>();
+
+  const resolve = (scriptName: string): ScriptPlanResolution => {
+    const cached = resolved.get(scriptName);
+    if (cached !== undefined) return cached;
+    const raw = rawPlans.get(scriptName);
+    if (raw === undefined) {
+      const result = { plan: undefined, reason: "The script could not be migrated safely." };
+      resolved.set(scriptName, result);
+      return result;
+    }
+    if (resolving.has(scriptName)) {
+      return {
+        plan: undefined,
+        reason: `The composite script contains a recursive reference to "${scriptName}".`,
+      };
+    }
+    resolving.add(scriptName);
+    try {
+      if (raw.kind === "single") {
+        const result = { plan: raw, reason: undefined };
+        resolved.set(scriptName, result);
+        return result;
+      }
+
+      const steps: StepPlan[] = [];
+      for (const step of raw.steps ?? []) {
+        if (NPM_LIFECYCLE_SCRIPT_NAMES.has(step.name)) {
+          steps.push(step);
+          continue;
+        }
+        const referenced = resolve(step.name);
+        if (referenced.reason?.includes("recursive reference") === true) {
+          const result = {
+            plan: undefined,
+            reason: `The composite script contains a recursive reference through "${step.name}".`,
+          };
+          resolved.set(scriptName, result);
+          return result;
+        }
+        if (referenced.plan === undefined) {
+          // This script will remain in package.json, so its package-manager
+          // invocation is still valid and preserves the unresolved boundary.
+          steps.push(step);
+          continue;
+        }
+        appendResolvedSteps(steps, step.name, referenced.plan);
+      }
+      const result: ScriptPlanResolution = {
+        plan: { kind: "steps", steps, projection: raw.projection },
+        reason: undefined,
+      };
+      resolved.set(scriptName, result);
+      return result;
+    } finally {
+      resolving.delete(scriptName);
+    }
+  };
+
+  for (const scriptName of rawPlans.keys()) resolve(scriptName);
+  return resolved;
+}
+
+function appendResolvedSteps(steps: StepPlan[], referencedName: string, plan: CommandPlan): void {
+  if (plan.kind === "single" && plan.argv !== undefined) {
+    steps.push({ name: referencedName, argv: plan.argv });
+    return;
+  }
+  for (const step of plan.steps ?? []) {
+    const baseName = `${referencedName}:${step.name}`;
+    let name = baseName;
+    let suffix = 2;
+    while (steps.some((existing) => existing.name === name)) {
+      name = `${baseName}:${suffix}`;
+      suffix += 1;
+    }
+    steps.push({ name, argv: step.argv });
+  }
+}
+
+function normalizeProducer(
+  argv: readonly [string, ...string[]],
+  packageManager: "pnpm" | "npm",
+  projection: CommandPlan["projection"],
+): { readonly ok: true; readonly argv: [string, ...string[]] } | { readonly ok: false; readonly reason: string } {
+  let normalized = [...argv];
+  if (projection === "test-result" && isNodeTestProducer(normalized)) {
+    const reporter = nodeTestReporter(normalized);
+    if (reporter === "unsupported") {
+      return {
+        ok: false,
+        reason: "The Node test producer declares a reporter that is not supported by the test-result projection.",
+      };
+    }
+    if (reporter === undefined) {
+      const testFlag = normalized.indexOf("--test");
+      normalized.splice(testFlag + 1, 0, "--test-reporter=tap");
+    }
+  }
+  if (packageManager === "pnpm" && !isDirectNodeOrPackageManager(normalized[0])) {
+    normalized = ["pnpm", "exec", ...normalized];
+  }
+  return { ok: true, argv: normalized as [string, ...string[]] };
+}
+
+function isNodeTestProducer(argv: readonly string[]): boolean {
+  return (argv[0] === "node" || argv[0] === "nodejs") && argv.includes("--test");
+}
+
+function nodeTestReporter(argv: readonly string[]): "tap" | "unsupported" | undefined {
+  let found = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--test-reporter") {
+      found = true;
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) return "unsupported";
+      if (value !== "tap") return "unsupported";
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--test-reporter=")) {
+      found = true;
+      if (argument.slice("--test-reporter=".length) !== "tap") return "unsupported";
+    }
+  }
+  return found ? "tap" : undefined;
+}
+
+function isDirectNodeOrPackageManager(command: string): boolean {
+  return command === "node" || command === "nodejs" || command === "pnpm" || command === "npm" || command === "npx";
 }
 
 /**
@@ -555,6 +710,8 @@ function applyInitPlan(cwd: string, plan: InitPlan): void {
   }
 
   const originalPackageJsonRaw = fs.readFileSync(packageJsonPath, "utf8");
+  const lockfilePath = path.join(cwd, plan.packageManager === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json");
+  const originalLockfileRaw = fs.readFileSync(lockfilePath, "utf8");
   const packageJsonSerialized = `${JSON.stringify(nextPackageJson, null, 2)}\n`;
   fs.writeFileSync(packageJsonPath, packageJsonSerialized);
 
@@ -568,9 +725,10 @@ function applyInitPlan(cwd: string, plan: InitPlan): void {
     nextPackageJson.devDependencies?.suzukuri !== undefined
   ) {
     try {
-      updateLockfile(cwd, plan.packageManager);
+      updateLockfile(cwd, plan.packageManager, nextPackageJson.devDependencies.suzukuri);
     } catch (error) {
       fs.writeFileSync(packageJsonPath, originalPackageJsonRaw);
+      fs.writeFileSync(lockfilePath, originalLockfileRaw);
       fs.rmSync(configTemp, { force: true });
       throw error;
     }
@@ -608,15 +766,29 @@ function computeNextPackageJson(current: PackageJson, plan: InitPlan): PackageJs
 }
 
 /**
- * Regenerates the package manager's lockfile from the just-written
- * package.json without touching node_modules, so `devDependencies.suzukuri`
- * is reflected in the lockfile and a subsequent frozen-lockfile / CI install
- * does not fail or drift.
+ * Records only the newly added Suzukuri dependency in the package manager's
+ * lockfile. pnpm's targeted add path avoids re-resolving the whole project.
  */
-function updateLockfile(cwd: string, packageManager: "pnpm" | "npm"): void {
+function updateLockfile(cwd: string, packageManager: "pnpm" | "npm", suzukuriVersion: string): void {
   const argv: [string, ...string[]] =
-    packageManager === "pnpm" ? ["pnpm", "install", "--lockfile-only"] : ["npm", "install", "--package-lock-only"];
-  const result = spawnSync(argv[0], argv.slice(1), { cwd, stdio: "pipe", encoding: "utf8" });
+    packageManager === "pnpm"
+      ? ["pnpm", "add", "--save-dev", "--lockfile-only", `suzukuri@${suzukuriVersion}`]
+      : ["npm", "install", "--package-lock-only"];
+  const workspacePath = path.join(cwd, "pnpm-workspace.yaml");
+  const workspaceExisted = fs.existsSync(workspacePath);
+  const originalWorkspaceRaw = workspaceExisted ? fs.readFileSync(workspacePath, "utf8") : undefined;
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawnSync(argv[0], argv.slice(1), { cwd, stdio: "pipe", encoding: "utf8" });
+  } finally {
+    if (originalWorkspaceRaw !== undefined) {
+      if (fs.readFileSync(workspacePath, "utf8") !== originalWorkspaceRaw) {
+        fs.writeFileSync(workspacePath, originalWorkspaceRaw);
+      }
+    } else if (!workspaceExisted && fs.existsSync(workspacePath)) {
+      fs.rmSync(workspacePath);
+    }
+  }
   if (result.error !== undefined || result.status !== 0) {
     throw new InitCommandError(
       "INIT_LOCKFILE_UPDATE_FAILED",
