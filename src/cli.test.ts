@@ -178,3 +178,89 @@ test("profile run accepts caller-supplied source and resolves the named profile"
     console.log = originalLog;
   }
 });
+
+test("test executes an explicit Node test producer and emits bounded success semantics", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-semantic-test-"));
+  const producer = path.join(tempDirectory, "producer.mjs");
+  const config = path.join(tempDirectory, "commands.json");
+  fs.writeFileSync(
+    producer,
+    "console.log('TAP version 13\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# skipped 0\\n# duration_ms 2');\n",
+  );
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: { test: [process.execPath, producer] } }));
+  console.log = (line: string) => lines.push(line);
+  console.error = (line: string) => errors.push(line);
+  try {
+    const exitCode = await runCli(["test", "--config", config]);
+    assert.equal(exitCode, 0);
+    assert.deepEqual(JSON.parse(lines.pop() ?? "{}"), {
+      counts: { failed: 0, passed: 1, skipped: 0, total: 1 },
+      durationMs: 2,
+      failures: [],
+      status: "passed",
+      version: "1.0.0",
+    });
+    assert.deepEqual(errors, []);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test("test projects supported failures without dumping producer output", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-semantic-test-failure-"));
+  const producer = path.join(tempDirectory, "producer.mjs");
+  const config = path.join(tempDirectory, "commands.json");
+  fs.writeFileSync(
+    producer,
+    "console.log('TAP version 13\\nnot ok 1 - adds numbers\\n# Expected 3\\n# Received 4\\n1..1\\n# tests 1\\n# pass 0\\n# fail 1'); process.exitCode = 1;\n",
+  );
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: { test: [process.execPath, producer] } }));
+  console.log = (line: string) => lines.push(line);
+  console.error = (line: string) => errors.push(line);
+  try {
+    const exitCode = await runCli(["test", "--config", config]);
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(lines.pop() ?? "{}") as {
+      status: string;
+      failures: Array<{ name: string; message: string }>;
+    };
+    assert.equal(result.status, "failed");
+    assert.equal(result.failures[0]?.name, "adds numbers");
+    assert.match(result.failures[0]?.message ?? "", /Expected 3/);
+    assert.deepEqual(errors, []);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test("test reports missing mapping with a stable bounded diagnostic", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const errors: string[] = [];
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-semantic-test-invalid-"));
+  const config = path.join(tempDirectory, "commands.json");
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: {} }));
+  console.log = () => {};
+  console.error = (line: string) => errors.push(line);
+  try {
+    const exitCode = await runCli(["test", "--config", config]);
+    assert.equal(exitCode, 1);
+    assert.match(errors.join("\n"), /EXECUTION_COMMAND_NOT_FOUND/);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
+  }
+});

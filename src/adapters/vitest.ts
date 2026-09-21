@@ -51,6 +51,7 @@ export function validateVitestSource(source: ProjectionSource): ValidationResult
 
 export function decodeVitest(source: ProjectionSource): TestResult {
   const text = sourceText(source, VITEST_ADAPTER_ID);
+  if (isNodeTestOutput(text)) return decodeNodeTest(text);
   const trimmed = text.trim();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     let value: unknown;
@@ -64,6 +65,87 @@ export function decodeVitest(source: ProjectionSource): TestResult {
     return decodeVitestJson(value);
   }
   return decodeVitestText(text);
+}
+
+/** Node's built-in test runner emits TAP; it shares the test-result contract. */
+function isNodeTestOutput(text: string): boolean {
+  return /^\s*TAP version \d+/im.test(text) || /^\s*1\.\.\d+/m.test(text);
+}
+
+function decodeNodeTest(text: string): TestResult {
+  const lines = stripAnsi(text).split(/\r?\n/);
+  const cases: ParsedTestCase[] = [];
+  let current: { name: string; messageParts: string[] } | undefined;
+  let total: number | undefined;
+  let passed: number | undefined;
+  let failed: number | undefined;
+  let skipped: number | undefined;
+  let durationMs: number | undefined;
+  let recognized = false;
+  const flush = (): void => {
+    if (current === undefined) return;
+    cases.push({
+      status: "failed",
+      name: current.name,
+      message: current.messageParts.join("\n").trim() || "Node test runner reported a failed test.",
+    });
+    current = undefined;
+  };
+  for (const line of lines) {
+    const plan = line.match(/^\s*1\.\.(\d+)/);
+    if (plan !== null) {
+      total = Number(plan[1]);
+      recognized = true;
+      continue;
+    }
+    const summary = line.match(/^\s*#\s+(tests|pass|fail|skipped|todo)\s+(\d+)\s*$/i);
+    if (summary !== null) {
+      const count = Number(summary[2]);
+      switch (summary[1].toLowerCase()) {
+        case "tests":
+          total = count;
+          break;
+        case "pass":
+          passed = count;
+          break;
+        case "fail":
+          failed = count;
+          break;
+        case "skipped":
+        case "todo":
+          skipped = (skipped ?? 0) + count;
+          break;
+      }
+      recognized = true;
+      continue;
+    }
+    const duration = line.match(/^\s*#\s+duration_ms\s+([0-9]+(?:\.[0-9]+)?)\s*$/i);
+    if (duration !== null) {
+      durationMs = Number(duration[1]);
+      recognized = true;
+      continue;
+    }
+    const failedCase = line.match(/^\s*not ok\s+\d+\s*-\s*(.+?)\s*$/i);
+    if (failedCase !== null) {
+      flush();
+      current = { name: failedCase[1], messageParts: [] };
+      recognized = true;
+      continue;
+    }
+    if (current !== undefined) {
+      const diagnostic = line.match(/^\s*#\s?(.*)$/);
+      if (diagnostic !== null && diagnostic[1].trim() !== "") current.messageParts.push(diagnostic[1].trim());
+    }
+  }
+  flush();
+  if (!recognized) throw new ProducerInputError(VITEST_ADAPTER_ID, "text is not recognized Node test output");
+  const summary: Partial<TestCounts> = {
+    ...(total === undefined ? {} : { total }),
+    ...(passed === undefined ? {} : { passed }),
+    ...(failed === undefined ? {} : { failed }),
+    ...(skipped === undefined ? {} : { skipped }),
+  };
+  return buildTestResult(summary, cases, durationMs);
 }
 
 interface ParsedTestCase {
