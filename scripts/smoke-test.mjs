@@ -195,6 +195,38 @@ function main() {
           fail(`installed test returned an unexpected result: ${testResult.stdout}`);
         }
 
+        const verifyProducer = path.join(profileDirectory, "verify-producer.mjs");
+        const verifyConfig = path.join(profileDirectory, "verify-commands.json");
+        fs.writeFileSync(
+          verifyProducer,
+          "if (process.argv.slice(2).join(' ') !== 'format:check lint typecheck test governance:actions test:package') process.exit(2);\n" +
+            "console.log('aggregate verify output that must not escape the bounded semantic result'.repeat(10000));\n",
+        );
+        fs.writeFileSync(
+          verifyConfig,
+          JSON.stringify({
+            schemaVersion: 1,
+            commands: {
+              verify: [
+                process.execPath,
+                verifyProducer,
+                "format:check",
+                "lint",
+                "typecheck",
+                "test",
+                "governance:actions",
+                "test:package",
+              ],
+            },
+          }),
+        );
+        console.log(`running ${name} verify through its installed launcher...`);
+        const verifyResult = run(launcher, ["verify", "--config", verifyConfig], { cwd: installDirectory });
+        const verifyOutput = JSON.parse(verifyResult.stdout);
+        if (verifyOutput.status !== "passed" || verifyOutput.completeness !== "complete") {
+          fail(`installed verify returned an unexpected result: ${verifyResult.stdout}`);
+        }
+
         const callerScript = path.join(installDirectory, "external-caller.mjs");
         fs.writeFileSync(
           callerScript,
