@@ -16,8 +16,17 @@ import {
   runProfile,
   validateProfileFile,
 } from "./profiles.js";
-import { findSkillScenario, listSkillScenarios, SkillScenarioNotFoundError } from "./skill.js";
 import {
+  boundedSkillIndex,
+  boundedSkillScenario,
+  findSkillScenario,
+  listSkillScenarios,
+  projectSkillIndexToJson,
+  projectSkillScenarioToJson,
+  SkillScenarioNotFoundError,
+} from "./skill.js";
+import {
+  commandUsage,
   type CommandDefinition,
   type CommandDomain,
   DOMAIN_SUMMARIES,
@@ -272,25 +281,18 @@ function runInspectionCommand(parsed: ParsedArguments, requestedKind: string | u
 
 function runSkillCommand(parsed: ParsedArguments): number {
   const scenarioId = parsed.positionals[1];
-  const asJson = hasOption(parsed, "json") || outputFormat(parsed) === "json";
+  const requestedFormat = option(parsed, "format", "output");
+  outputFormat(parsed);
+  const asJson = hasOption(parsed, "json") || requestedFormat === "json";
   if (scenarioId === undefined) {
-    const scenarios = listSkillScenarios();
-    if (asJson) {
-      printJson({ scenarios: scenarios.map((scenario) => ({ id: scenario.id, summary: scenario.summary })) });
-    } else {
-      printText(scenarios.map((scenario) => `${scenario.id}\t${scenario.summary}`).join("\n"));
-    }
+    printText(boundedSkillIndex(asJson));
     return 0;
   }
   const scenario = findSkillScenario(scenarioId);
   if (scenario === undefined) {
     throw new SkillScenarioNotFoundError(scenarioId);
   }
-  if (asJson) {
-    printJson(scenario);
-  } else {
-    printText([`${scenario.id}: ${scenario.summary}`, "", ...scenario.steps.map((step) => `- ${step}`)].join("\n"));
-  }
+  printText(boundedSkillScenario(scenario, asJson));
   return 0;
 }
 
@@ -452,7 +454,7 @@ function printError(error: unknown, format: OutputFormat): void {
 const FULL_OPTION_REFERENCE: readonly string[] = [
   "--help[=full|json]  Print progressive help; use --help=full for the complete reference or --help=json for discovery.",
   "--json  Emit structured JSON output (skill).",
-  "--format json|text  JSON is the stable automation contract (default: json).",
+  "--format json|text  JSON is the stable automation contract (skill defaults to human-readable output).",
   "--human  Use human-readable output.",
   "--version  Print version and runtime contract metadata.",
   "--diagnose  Check standalone runtime readiness.",
@@ -483,11 +485,13 @@ function printSkillHelp(scenarioId: string | undefined): void {
   if (scenarioId !== undefined) {
     const scenario = findSkillScenario(scenarioId);
     if (scenario !== undefined) {
+      const usage = commandUsage("skill.scenario").replace("<scenario>", scenario.id);
       console.log(
         [
-          `Usage: suzukuri skill ${scenario.id} [--json]`,
+          `Usage: ${usage}`,
           "",
-          scenario.summary,
+          scenario.title,
+          scenario.whenToUse,
           "",
           "Run `suzukuri skill` for the full scenario list.",
         ].join("\n"),
@@ -495,17 +499,20 @@ function printSkillHelp(scenarioId: string | undefined): void {
       return;
     }
   }
-  const lines = listSkillScenarios().map((scenario) => `  skill ${scenario.id} [--json]  - ${scenario.summary}`);
+  const indexUsage = commandUsage("skill.index");
+  const lines = listSkillScenarios().map(
+    (scenario) => `  ${commandUsage("skill.scenario").replace("<scenario>", scenario.id)}  - ${scenario.title}`,
+  );
   console.log(
     [
-      "Usage: suzukuri skill [scenario] [--json]",
+      `Usage: ${indexUsage}`,
       "",
       getDomainDescription("skill") ?? "",
       "",
       "Scenarios:",
       ...lines,
       "",
-      "Run `suzukuri skill <scenario> --json` for that scenario's full steps.",
+      `Run \`${commandUsage("skill.scenario")}\` for that scenario's full projection.`,
     ].join("\n"),
   );
 }
@@ -588,9 +595,9 @@ function projectCommandHelp(positionals: readonly string[]): unknown {
     const scenarioId = positionals[1];
     if (scenarioId !== undefined) {
       const scenario = findSkillScenario(scenarioId);
-      if (scenario !== undefined) return scenario;
+      if (scenario !== undefined) return projectSkillScenarioToJson(scenario);
     }
-    return { domain, description: getDomainDescription("skill"), scenarios: listSkillScenarios() };
+    return { domain, description: getDomainDescription("skill"), ...projectSkillIndexToJson() };
   }
   const definition = getCommandForPositionals(positionals);
   if (definition !== undefined && (definition.positionalSyntax === undefined || positionals.length > 1)) {
