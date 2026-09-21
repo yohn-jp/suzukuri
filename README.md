@@ -2,6 +2,13 @@
   <img src="./docs/assets/readme/suzukuri-hero.webp" alt="Suzukuri — Bounded Semantic Views. Find the right information. Build with confidence." width="100%">
 </p>
 
+<p align="center">
+  <a href="https://github.com/yohn-jp/suzukuri/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yohn-jp/suzukuri/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://www.npmjs.com/package/suzukuri"><img alt="npm" src="https://img.shields.io/npm/v/suzukuri"></a>
+  <a href="https://www.npmjs.com/package/suzukuri"><img alt="Node" src="https://img.shields.io/node/v/suzukuri"></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/npm/l/suzukuri"></a>
+</p>
+
 # Suzukuri
 
 Suzukuri is a deterministic, bounded semantic view engine. It provides an explicit adapter → semantic-contract → view → renderer pipeline for CLI and TypeScript library consumers.
