@@ -1,5 +1,9 @@
 name: Issue Governance
 
+# Canonical wrapper distributed via .github/sync.yml (SKIP_PR: true, direct
+# push) — do not hand-edit in a consumer repository; edit this file in
+# yohn-jp/.github instead.
+
 on:
   issues:
     types: [opened, edited, reopened]
@@ -9,8 +13,8 @@ permissions:
   issues: write
 
 jobs:
-  governance:
+  validate-issue:
+    uses: yohn-jp/.github/.github/workflows/issue-governance.yml@main
     permissions:
       contents: read
       issues: write
-    uses: yohn-jp/.github/.github/workflows/issue-governance.yml@4fb520dcfc63f386a2e33d6c0a74f251f8dc9bdb
