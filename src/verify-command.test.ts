@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,30 @@ function fixture(prefix: string): { directory: string; producer: string; config:
     producer: path.join(directory, "producer.mjs"),
     config: path.join(directory, "commands.json"),
   };
+}
+
+interface GitFixture {
+  readonly directory: string;
+  readonly repository: string;
+  readonly producer: string;
+  readonly config: string;
+  readonly counter: string;
+}
+
+// The producer, config, and run counter live outside the fingerprinted
+// repository: an in-repo counter would self-invalidate the cache on every
+// producer run, since it is a non-ignored untracked file.
+function gitFixture(prefix: string): GitFixture {
+  const base = fixture(prefix);
+  const repository = path.join(base.directory, "repo");
+  fs.mkdirSync(repository);
+  execFileSync("git", ["init", "--quiet"], { cwd: repository });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
+  fs.writeFileSync(path.join(repository, "source.txt"), "content");
+  execFileSync("git", ["add", "source.txt"], { cwd: repository });
+  execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: repository });
+  return { ...base, repository, counter: path.join(base.directory, "runs.count") };
 }
 
 test("verify returns a minimal semantic success result for an explicit aggregate argv", async () => {
@@ -121,6 +146,84 @@ test("verify preserves a producer signal outcome", async () => {
     assert.equal(result.signal, "SIGTERM");
     assert.equal(result.exitCode, null);
   } finally {
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a second unchanged verify invocation returns the prior bounded result without spawning the producer again", async () => {
+  const { repository, directory, producer, config, counter } = gitFixture("suzukuri-verify-cache-hit-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  const lines: string[] = [];
+  fs.writeFileSync(producer, `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(counter)}, "x");\n`);
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: { verify: [process.execPath, producer] } }));
+  console.log = (line: string) => lines.push(line);
+  try {
+    process.chdir(repository);
+    const first = await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(first, 0);
+    assert.equal(fs.readFileSync(counter, "utf8"), "x");
+
+    const second = await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(second, 0);
+    assert.equal(fs.readFileSync(counter, "utf8"), "x", "producer must not run a second time on a cache hit");
+
+    const secondResult = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+    assert.equal(secondResult.reused, true);
+    assert.equal(secondResult.status, "passed");
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a cached failed verify result is reused while content is unchanged", async () => {
+  const { repository, directory, producer, config, counter } = gitFixture("suzukuri-verify-cache-failure-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  const lines: string[] = [];
+  fs.writeFileSync(
+    producer,
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(counter)}, "x"); console.log("> pkg@1 lint /repo"); process.exitCode = 1;\n`,
+  );
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: { verify: [process.execPath, producer] } }));
+  console.log = (line: string) => lines.push(line);
+  try {
+    process.chdir(repository);
+    const first = await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(first, 1);
+
+    const second = await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(second, 1);
+    assert.equal(fs.readFileSync(counter, "utf8"), "x", "producer must not run a second time on a cache hit");
+
+    const secondResult = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+    assert.equal(secondResult.reused, true);
+    assert.equal(secondResult.status, "failed");
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an included byte change after a verify cache hit causes the producer to run again", async () => {
+  const { repository, directory, producer, config, counter } = gitFixture("suzukuri-verify-cache-invalidate-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  console.log = () => {};
+  fs.writeFileSync(producer, `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(counter)}, "x");\n`);
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: { verify: [process.execPath, producer] } }));
+  try {
+    process.chdir(repository);
+    await runVerifyCommand({ positionals: [], options: { config } });
+    fs.writeFileSync(path.join(repository, "source.txt"), "changed");
+    await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(fs.readFileSync(counter, "utf8"), "xx");
+  } finally {
+    process.chdir(originalCwd);
     console.log = originalLog;
     fs.rmSync(directory, { recursive: true, force: true });
   }

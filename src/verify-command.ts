@@ -1,4 +1,5 @@
 import { stableJsonStringify } from "./core.js";
+import { lookupExecutionCache, markResultReused } from "./execution-cache.js";
 import {
   DEFAULT_PROCESS_OUTPUT_LIMIT,
   loadExecutionConfig,
@@ -7,7 +8,7 @@ import {
   runBoundedProcess,
 } from "./execution.js";
 import type { VerifyResult } from "./verify-result.js";
-import { VERIFY_RESULT_SCHEMA_VERSION } from "./verify-result.js";
+import { isVerifyResult, VERIFY_RESULT_SCHEMA_VERSION } from "./verify-result.js";
 
 export const DEFAULT_VERIFY_DIAGNOSTIC_BYTES = 8 * 1024;
 
@@ -52,9 +53,24 @@ export async function runVerifyCommand(parsed: VerifyCommandArguments): Promise<
   const configPath = option(parsed, "config", "commands", "execution");
   const config = loadExecutionConfig(configPath);
   const command = resolveExecutionCommand(config, "verify");
+
+  const lookup = await lookupExecutionCache("verify", command);
+  if (lookup?.cached !== undefined && isVerifyResult(lookup.cached.printed)) {
+    const result = markResultReused(lookup.cached.printed) as VerifyResult;
+    console.log(format === "text" ? renderVerifyText(result) : stableJsonStringify(result));
+    return processResultExitCode(lookup.cached);
+  }
+
   const maxOutputBytes = command.budget ?? DEFAULT_PROCESS_OUTPUT_LIMIT;
   const processResult = await runBoundedProcess(command.argv, { maxOutputBytes });
   const result = createVerifyResult(processResult, command.budget ?? DEFAULT_VERIFY_DIAGNOSTIC_BYTES);
+  if (lookup !== undefined) {
+    await lookup.commit({
+      exitCode: processResult.exitCode,
+      signal: processResult.signal,
+      printed: result,
+    });
+  }
   if (format === "text") {
     console.log(renderVerifyText(result));
   } else {
