@@ -17,6 +17,13 @@ function run(command, args, options = {}) {
   return result;
 }
 
+// npm <12 reports `pack --json` results as a one-element array; npm >=12
+// reports an object keyed by package name instead.
+function parsePackInfo(stdout, packageName) {
+  const parsed = JSON.parse(stdout);
+  return Array.isArray(parsed) ? parsed[0] : parsed[packageName];
+}
+
 function main() {
   const distEntry = path.join(repoRoot, "dist", "index.js");
   if (!fs.existsSync(distEntry)) throw new Error("dist is missing; run pnpm run build before the package suite");
@@ -24,13 +31,12 @@ function main() {
   // --ignore-scripts: dist is already built above; without this, npm's prepack
   // hook re-runs the build and chmod-bin.mjs's stdout log interleaves with
   // this command's --json output, breaking JSON.parse (npm >=10).
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const packResult = run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"]);
-  const [packInfo] = JSON.parse(packResult.stdout);
+  const packInfo = parsePackInfo(packResult.stdout, packageJson.name);
   const packedFiles = packInfo.files.map((entry) => entry.path);
 
-  const executableBinPaths = Object.values(
-    JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).bin ?? {},
-  );
+  const executableBinPaths = Object.values(packageJson.bin ?? {});
   for (const binPath of executableBinPaths) {
     if (!packedFiles.includes(binPath)) {
       throw new Error(`bin entry "${binPath}" is not included in the packed tarball`);

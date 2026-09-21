@@ -33,6 +33,13 @@ function fail(message) {
   throw new Error(message);
 }
 
+// npm <12 reports `pack --json` results as a one-element array; npm >=12
+// reports an object keyed by package name instead.
+function parsePackInfo(stdout, name) {
+  const parsed = JSON.parse(stdout);
+  return Array.isArray(parsed) ? parsed[0] : parsed[name];
+}
+
 function packageBinTargets(packageDirectory) {
   const installedPackageJson = JSON.parse(fs.readFileSync(path.join(packageDirectory, "package.json"), "utf8"));
   const bin = installedPackageJson.bin;
@@ -61,7 +68,7 @@ function main() {
     // Verifies the dist produced by the build step, not a re-built one:
     // prepack's implicit rebuild is intentionally not relied on here.
     const packResult = run("npm", ["pack", "--json", "--ignore-scripts"], { cwd: repoRoot });
-    const [packInfo] = JSON.parse(packResult.stdout);
+    const packInfo = parsePackInfo(packResult.stdout, packageName);
     tarballPath = path.join(repoRoot, packInfo.filename);
     ownsTarball = true;
   }

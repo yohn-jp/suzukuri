@@ -476,9 +476,13 @@ function printSkillHelp(scenarioId: string | undefined): void {
     const scenario = findSkillScenario(scenarioId);
     if (scenario !== undefined) {
       console.log(
-        [`Usage: suzukuri skill ${scenario.id} [--json]`, "", scenario.summary, "", "Run `suzukuri skill` for the full scenario list."].join(
-          "\n",
-        ),
+        [
+          `Usage: suzukuri skill ${scenario.id} [--json]`,
+          "",
+          scenario.summary,
+          "",
+          "Run `suzukuri skill` for the full scenario list.",
+        ].join("\n"),
       );
       return;
     }
