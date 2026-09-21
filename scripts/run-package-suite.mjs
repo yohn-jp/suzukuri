@@ -24,13 +24,14 @@ function main() {
   // --ignore-scripts: dist is already built above; without this, npm's prepack
   // hook re-runs the build and chmod-bin.mjs's stdout log interleaves with
   // this command's --json output, breaking JSON.parse (npm >=10).
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const packResult = run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"]);
-  const [packInfo] = JSON.parse(packResult.stdout);
+  // npm >=12 reports pack results as an object keyed by package name, rather
+  // than the array earlier npm versions returned.
+  const packInfo = JSON.parse(packResult.stdout)[packageJson.name];
   const packedFiles = packInfo.files.map((entry) => entry.path);
 
-  const executableBinPaths = Object.values(
-    JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).bin ?? {},
-  );
+  const executableBinPaths = Object.values(packageJson.bin ?? {});
   for (const binPath of executableBinPaths) {
     if (!packedFiles.includes(binPath)) {
       throw new Error(`bin entry "${binPath}" is not included in the packed tarball`);
