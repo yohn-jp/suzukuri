@@ -7,18 +7,65 @@ export const EXECUTION_SCHEMA_VERSION = 1 as const;
 export const DEFAULT_EXECUTION_CONFIG_PATH = ".suzukuri/commands.json";
 export const DEFAULT_PROCESS_OUTPUT_LIMIT = 64 * 1024;
 
-export type ExecutionCommandName = "test" | "verify" | "diff";
+/**
+ * A repository-local command name in `.suzukuri/commands.json`, e.g.
+ * "build", "test", "lint", "verify". Any non-empty name is a valid registry
+ * key; there is no fixed vocabulary, so a repository can register whatever
+ * operations its own tooling exposes.
+ */
+export type ExecutionCommandName = string;
 
-export interface ExecutionCommand {
+/**
+ * Selects the semantic projection used to interpret a command's producer
+ * output. "generic" (the default) preserves only bounded outcome fields
+ * (exit/signal, duration, bounded stdout/stderr, truncation) without
+ * assuming any domain-specific structure. "test-result" and
+ * "verification-result" opt into the existing specialized adapters.
+ */
+export type ExecutionProjectionKind = "generic" | "test-result" | "verification-result";
+
+/**
+ * Declares whether a command's cached result may be reused while the
+ * repository content fingerprint is unchanged. Reuse is conservative by
+ * default: a "generic" command's producer identity gives no evidence it is
+ * side-effect-free, so it defaults to "never" and must opt in explicitly.
+ * "test-result"/"verification-result" commands are conventionally read-only
+ * verification producers, so they default to "fingerprint".
+ */
+export type ExecutionReuseMode = "fingerprint" | "never";
+
+export interface ExecutionCommandStep {
+  readonly name: string;
   readonly argv: readonly [string, ...string[]];
   readonly adapter?: string;
   readonly view?: string;
   readonly budget?: number;
 }
 
+export interface SingleExecutionCommand {
+  readonly argv: readonly [string, ...string[]];
+  readonly adapter?: string;
+  readonly view?: string;
+  readonly budget?: number;
+  readonly projection: ExecutionProjectionKind;
+  readonly reuse: ExecutionReuseMode;
+}
+
+export interface SteppedExecutionCommand {
+  readonly steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]];
+  readonly projection: ExecutionProjectionKind;
+  readonly reuse: ExecutionReuseMode;
+}
+
+export type ExecutionCommand = SingleExecutionCommand | SteppedExecutionCommand;
+
+export function isSteppedExecutionCommand(command: ExecutionCommand): command is SteppedExecutionCommand {
+  return "steps" in command;
+}
+
 export interface ExecutionConfig {
   readonly schemaVersion: typeof EXECUTION_SCHEMA_VERSION;
-  readonly commands: Readonly<Partial<Record<ExecutionCommandName, ExecutionCommand>>>;
+  readonly commands: Readonly<Record<ExecutionCommandName, ExecutionCommand>>;
 }
 
 export type ExecutionErrorCode =
@@ -62,10 +109,6 @@ function isRecord(value: unknown): value is RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isCommandName(value: string): value is ExecutionCommandName {
-  return value === "test" || value === "verify" || value === "diff";
-}
-
 function unknownKeys(value: RecordValue, allowed: readonly string[]): string[] {
   const accepted = new Set(allowed);
   return Object.keys(value)
@@ -77,14 +120,99 @@ function configIssue(pathName: string, message: string): ExecutionError {
   return new ExecutionError("EXECUTION_CONFIG_INVALID", { path: pathName, reason: message });
 }
 
+const PROJECTION_KINDS: readonly ExecutionProjectionKind[] = ["generic", "test-result", "verification-result"];
+
+/** A command's default reuse mode when not explicitly declared: conservative unless its projection is a known read-only verification shape. */
+function defaultReuseMode(projection: ExecutionProjectionKind): ExecutionReuseMode {
+  return projection === "generic" ? "never" : "fingerprint";
+}
+
+/** A command name's default projection when not explicitly declared, preserving prior `test`/`verify` behavior. */
+function defaultProjection(commandName: string): ExecutionProjectionKind {
+  if (commandName === "test") return "test-result";
+  if (commandName === "verify") return "verification-result";
+  return "generic";
+}
+
 function normalizeCommand(value: unknown, commandName: string): ExecutionCommand {
   const issuePath = `$.commands.${commandName}`;
+  const projection = readProjection(value, issuePath, commandName);
+  const reuse = readReuse(value, issuePath, projection);
+  if (isRecord(value) && value.steps !== undefined) {
+    for (const key of unknownKeys(value, ["steps", "projection", "reuse"])) {
+      throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
+    }
+    if (!Array.isArray(value.steps) || value.steps.length === 0) {
+      throw configIssue(`${issuePath}.steps`, "Command steps must be a non-empty array.");
+    }
+    const seenNames = new Set<string>();
+    const steps = value.steps.map((step, index) => {
+      const stepPath = `${issuePath}.steps[${index}]`;
+      if (!isRecord(step)) throw configIssue(stepPath, "Each step must be an object.");
+      if (typeof step.name !== "string" || step.name.trim() === "") {
+        throw configIssue(`${stepPath}.name`, "Step name must be a non-empty string.");
+      }
+      if (seenNames.has(step.name)) {
+        throw configIssue(`${stepPath}.name`, `Step name "${step.name}" must be unique within the command.`);
+      }
+      seenNames.add(step.name);
+      const normalized = normalizeSingleCommand(step, stepPath, [
+        "name",
+        "argv",
+        "command",
+        "adapter",
+        "view",
+        "budget",
+      ]);
+      const stepDefinition: ExecutionCommandStep = { name: step.name, ...normalized };
+      return stepDefinition;
+    });
+    return { steps: steps as [ExecutionCommandStep, ...ExecutionCommandStep[]], projection, reuse };
+  }
+  const single = normalizeSingleCommand(value, issuePath, [
+    "argv",
+    "command",
+    "adapter",
+    "view",
+    "budget",
+    "projection",
+    "reuse",
+  ]);
+  return { ...single, projection, reuse };
+}
+
+function readProjection(value: unknown, issuePath: string, commandName: string): ExecutionProjectionKind {
+  if (!isRecord(value) || value.projection === undefined) return defaultProjection(commandName);
+  const raw = value.projection;
+  if (typeof raw !== "string" || !PROJECTION_KINDS.includes(raw as ExecutionProjectionKind)) {
+    throw configIssue(`${issuePath}.projection`, `Command projection must be one of ${PROJECTION_KINDS.join(", ")}.`);
+  }
+  return raw as ExecutionProjectionKind;
+}
+
+function readReuse(value: unknown, issuePath: string, projection: ExecutionProjectionKind): ExecutionReuseMode {
+  if (!isRecord(value) || value.reuse === undefined) return defaultReuseMode(projection);
+  const raw = value.reuse;
+  if (raw !== "fingerprint" && raw !== "never") {
+    throw configIssue(`${issuePath}.reuse`, 'Command reuse must be "fingerprint" or "never".');
+  }
+  return raw;
+}
+
+interface ArgvBearingCommand {
+  readonly argv: readonly [string, ...string[]];
+  readonly adapter?: string;
+  readonly view?: string;
+  readonly budget?: number;
+}
+
+function normalizeSingleCommand(value: unknown, issuePath: string, allowedKeys: readonly string[]): ArgvBearingCommand {
   let argvValue: unknown = value;
   let adapter: string | undefined;
   let view: string | undefined;
   let budget: number | undefined;
   if (isRecord(value)) {
-    for (const key of unknownKeys(value, ["argv", "command", "adapter", "view", "budget"])) {
+    for (const key of unknownKeys(value, allowedKeys)) {
       throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
     }
     argvValue = value.argv ?? value.command;
@@ -128,10 +256,14 @@ export function parseExecutionConfig(input: unknown): ExecutionConfig {
       ["test", "verify", "diff"].filter((name) => input[name] !== undefined).map((name) => [name, input[name]]),
     );
   if (!isRecord(rawCommands)) throw configIssue("$.commands", "Execution commands must be an object.");
-  const commands: Partial<Record<ExecutionCommandName, ExecutionCommand>> = {};
+  const commands: Record<ExecutionCommandName, ExecutionCommand> = {};
   for (const [name, value] of Object.entries(rawCommands)) {
-    if (!isCommandName(name)) throw configIssue(`$.commands.${name}`, `Unsupported execution command "${name}".`);
-    commands[name] = normalizeCommand(value, name);
+    if (name.trim() === "") throw configIssue("$.commands", "Command names must not be empty.");
+    const command = normalizeCommand(value, name);
+    if (name === "diff" && isSteppedExecutionCommand(command)) {
+      throw configIssue(`$.commands.${name}`, `Command "diff" does not support ordered steps.`);
+    }
+    commands[name] = command;
   }
   return { schemaVersion: EXECUTION_SCHEMA_VERSION, commands };
 }
@@ -227,6 +359,7 @@ export interface BoundedProcessResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly truncated: boolean;
+  readonly durationMs: number;
 }
 
 export interface BoundedProcessOptions {
@@ -243,6 +376,7 @@ export function runBoundedProcess(
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1) {
     return Promise.reject(new ExecutionError("EXECUTION_COMMAND_FAILED", { reason: "invalid output limit" }));
   }
+  const startedAt = performance.now();
   return new Promise((resolve, reject) => {
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
@@ -271,9 +405,44 @@ export function runBoundedProcess(
         stdout: stdout.toString(),
         stderr: stderr.toString(),
         truncated: stdout.truncated || stderr.truncated,
+        durationMs: performance.now() - startedAt,
       });
     });
   });
+}
+
+export interface StepProcessResult extends BoundedProcessResult {
+  readonly name: string;
+}
+
+export interface SteppedProcessResult {
+  readonly steps: readonly StepProcessResult[];
+  /** The step that stopped execution, or undefined when every step passed. */
+  readonly failedStep: StepProcessResult | undefined;
+}
+
+/**
+ * Runs each step's argv in declared order, stopping at the first
+ * failed/signaled step so later steps never run once an earlier one has
+ * already failed, matching `&&` aggregate semantics.
+ */
+export async function runBoundedCommandSteps(
+  steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]],
+  options: BoundedProcessOptions = {},
+): Promise<SteppedProcessResult> {
+  const results: StepProcessResult[] = [];
+  for (const step of steps) {
+    const result = await runBoundedProcess(step.argv, {
+      ...options,
+      maxOutputBytes: step.budget ?? options.maxOutputBytes,
+    });
+    const stepResult: StepProcessResult = { ...result, name: step.name };
+    results.push(stepResult);
+    if (result.exitCode !== 0 || result.signal !== null) {
+      return { steps: results, failedStep: stepResult };
+    }
+  }
+  return { steps: results, failedStep: undefined };
 }
 
 export function processResultExitCode(result: Pick<BoundedProcessResult, "exitCode" | "signal">): number {

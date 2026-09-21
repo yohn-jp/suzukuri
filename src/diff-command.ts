@@ -4,6 +4,8 @@ import type { ProjectionResult } from "./core.js";
 import { stableJsonStringify } from "./core.js";
 import {
   DEFAULT_EXECUTION_CONFIG_PATH,
+  ExecutionError,
+  isSteppedExecutionCommand,
   loadExecutionConfig,
   processResultExitCode,
   resolveExecutionCommand,
@@ -172,12 +174,23 @@ function resolveConfiguredDiff(parsed: DiffCommandArguments): ConfiguredDiffComm
   const resolvedPath = resolveExecutionConfigPath(configPath ?? DEFAULT_EXECUTION_CONFIG_PATH);
   if (!fs.existsSync(resolvedPath)) {
     if (configPath !== undefined) {
-      return resolveExecutionCommand(loadExecutionConfig(configPath), "diff");
+      return asSingleDiffCommand(resolveExecutionCommand(loadExecutionConfig(configPath), "diff"));
     }
     return undefined;
   }
   const config = loadExecutionConfig(configPath);
-  return config.commands.diff === undefined ? undefined : resolveExecutionCommand(config, "diff");
+  return config.commands.diff === undefined ? undefined : asSingleDiffCommand(resolveExecutionCommand(config, "diff"));
+}
+
+/** `diff` never accepts ordered steps; parseExecutionConfig already rejects them. */
+function asSingleDiffCommand(command: ReturnType<typeof resolveExecutionCommand>): ConfiguredDiffCommand {
+  if (isSteppedExecutionCommand(command)) {
+    throw new ExecutionError("EXECUTION_CONFIG_INVALID", {
+      path: "$.commands.diff",
+      reason: 'Command "diff" does not support ordered steps.',
+    });
+  }
+  return command;
 }
 
 function assertSupportedOptions(parsed: DiffCommandArguments): void {

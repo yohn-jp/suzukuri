@@ -7,11 +7,13 @@
 
 export type CommandDomain =
   | "root"
+  | "run"
   | "test"
   | "profile"
   | "project"
   | "diff"
   | "verify"
+  | "init"
   | "adapters"
   | "views"
   | "contracts"
@@ -30,11 +32,16 @@ export interface CommandDefinition {
 }
 
 export const DOMAIN_SUMMARIES: ReadonlyArray<{ readonly domain: CommandDomain; readonly description: string }> = [
+  { domain: "run", description: "Execute any repository-local command registered in .suzukuri/commands.json" },
   { domain: "test", description: "Execute the configured repository test producer and project bounded results" },
   { domain: "profile", description: "Repository-local profile discovery, validation, and execution" },
   { domain: "project", description: "Explicit low-level adapter/view/renderer projection" },
   { domain: "diff", description: "Bounded git diff/status projection" },
   { domain: "verify", description: "Repository-mapped semantic verify execution" },
+  {
+    domain: "init",
+    description: "Guided import of a repository's command vocabulary into the Suzukuri command registry",
+  },
   { domain: "adapters", description: "Inspect the registered adapter surface" },
   { domain: "views", description: "Inspect the registered view surface" },
   { domain: "contracts", description: "Inspect the registered semantic-contract surface" },
@@ -44,6 +51,15 @@ export const DOMAIN_SUMMARIES: ReadonlyArray<{ readonly domain: CommandDomain; r
 ];
 
 export const SUZUKURI_COMMANDS: readonly CommandDefinition[] = [
+  {
+    id: "run",
+    domain: "run",
+    path: ["run"],
+    positionalSyntax: "<command>",
+    usage: "run <command> [--config path] [--format json|text]",
+    summary: "Execute a repository-local command registered in .suzukuri/commands.json.",
+    example: "suzukuri run build",
+  },
   {
     id: "test",
     domain: "test",
@@ -109,6 +125,15 @@ export const SUZUKURI_COMMANDS: readonly CommandDefinition[] = [
     usage: "verify [--config path] [--format json|text]",
     summary: "Run the configured repository verify producer and project bounded results.",
     example: "suzukuri verify --config .suzukuri/commands.json",
+  },
+  {
+    id: "init",
+    domain: "init",
+    path: ["init"],
+    usage: "init [--yes] [--dry-run]",
+    summary:
+      "Inspect an existing repository's command vocabulary and propose a confirmed import into .suzukuri/commands.json.",
+    example: "suzukuri init",
   },
   {
     id: "adapters",

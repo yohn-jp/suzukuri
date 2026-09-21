@@ -171,12 +171,19 @@ export interface ExecutionCacheLookup {
  * when the repository content fingerprint cannot be proven complete and
  * stable, so callers fail closed to a live producer run without caching its
  * result rather than risk keying on or reusing an unsafe fingerprint.
+ *
+ * Also returns `undefined` when the command's own `reuse` mode is `"never"`:
+ * an unchanged repository fingerprint proves the tracked/non-ignored file
+ * content is identical, but it proves nothing about a command's side
+ * effects (network calls, writes outside the fingerprinted tree, external
+ * state). Reuse is therefore conservative and commands must opt in.
  */
 export async function lookupExecutionCache(
   commandName: ExecutionCommandName,
   command: ExecutionCommand,
   options: ExecutionCacheOptions = {},
 ): Promise<ExecutionCacheLookup | undefined> {
+  if (command.reuse === "never") return undefined;
   let fingerprint: string;
   try {
     fingerprint = await computeRepositoryFingerprint(options.cwd);

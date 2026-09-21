@@ -255,6 +255,20 @@ function main() {
           fail(`installed verify returned an unexpected result: ${verifyResult.stdout}`);
         }
 
+        const runProducer = path.join(profileDirectory, "run-producer.mjs");
+        const runConfig = path.join(profileDirectory, "run-commands.json");
+        fs.writeFileSync(runProducer, "console.log('built'); process.exitCode = 0;\n");
+        fs.writeFileSync(
+          runConfig,
+          JSON.stringify({ schemaVersion: 1, commands: { build: { argv: [process.execPath, runProducer] } } }),
+        );
+        console.log(`running ${name} run build through its installed launcher...`);
+        const runResult = run(launcher, ["run", "build", "--config", runConfig], { cwd: installDirectory });
+        const runOutput = JSON.parse(runResult.stdout);
+        if (runOutput.command !== "build" || runOutput.status !== "passed") {
+          fail(`installed run returned an unexpected result: ${runResult.stdout}`);
+        }
+
         const callerScript = path.join(installDirectory, "external-caller.mjs");
         fs.writeFileSync(
           callerScript,

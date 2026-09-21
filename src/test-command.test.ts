@@ -68,6 +68,52 @@ test("a second unchanged invocation returns the prior bounded result without spa
   }
 });
 
+test("a stepped test command projects the final step using that step's own declared budget", async () => {
+  const { repository, cleanup } = fixture("suzukuri-test-steps-budget-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  const lines: string[] = [];
+  const lintScript = path.join(repository, "..", "lint.mjs");
+  const unitScript = path.join(repository, "..", "unit.mjs");
+  const config = path.join(repository, "..", "commands.json");
+  fs.writeFileSync(lintScript, "process.exitCode = 0;\n");
+  fs.writeFileSync(unitScript, `process.stdout.write(${JSON.stringify(TAP_PASS.repeat(50))});`);
+  const stepBudget = 1024;
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: {
+        test: {
+          steps: [
+            { name: "lint", argv: [process.execPath, lintScript] },
+            { name: "unit", argv: [process.execPath, unitScript], budget: stepBudget },
+          ],
+        },
+      },
+    }),
+  );
+  console.log = (line: string) => lines.push(line);
+  try {
+    process.chdir(repository);
+    const exitCode = await runTestCommand({ positionals: [], options: { config } });
+    assert.equal(exitCode, 0);
+    const printed = lines[0] ?? "";
+    assert.ok(
+      Buffer.byteLength(printed, "utf8") <= stepBudget,
+      `projection must honor the final step's own ${String(stepBudget)}-byte budget, got ${String(Buffer.byteLength(printed, "utf8"))} bytes`,
+    );
+    assert.ok(
+      Buffer.byteLength(printed, "utf8") < TAP_PASS.repeat(50).length,
+      "the untruncated projection must not fit, proving the step's smaller budget (not the 8KB default) was applied",
+    );
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    cleanup();
+  }
+});
+
 test("an included byte change after a cache hit causes the producer to run again", async () => {
   const { repository, producer, config, counter, cleanup } = fixture("suzukuri-test-cache-invalidate-");
   const originalCwd = process.cwd();

@@ -1,0 +1,250 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import { runCli } from "./cli.js";
+import { RunCommandError, runRunCommand } from "./run-command.js";
+import { GENERIC_RESULT_SCHEMA_VERSION, isGenericCommandResult } from "./generic-result.js";
+
+function fixture(prefix: string): { directory: string; config: string } {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return { directory, config: path.join(directory, "commands.json") };
+}
+
+interface GitFixture {
+  readonly directory: string;
+  readonly repository: string;
+  readonly config: string;
+  readonly counter: string;
+}
+
+function gitFixture(prefix: string): GitFixture {
+  const base = fixture(prefix);
+  const repository = path.join(base.directory, "repo");
+  fs.mkdirSync(repository);
+  execFileSync("git", ["init", "--quiet"], { cwd: repository });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
+  fs.writeFileSync(path.join(repository, "source.txt"), "content");
+  execFileSync("git", ["add", "source.txt"], { cwd: repository });
+  execFileSync("git", ["commit", "-m", "init", "--quiet"], { cwd: repository });
+  return { ...base, repository, counter: path.join(base.directory, "runs.count") };
+}
+
+test("suzukuri run resolves an arbitrary registered command name and executes it", async () => {
+  const { directory, config } = fixture("suzukuri-run-generic-");
+  const script = path.join(directory, "build.mjs");
+  fs.writeFileSync(script, "console.log('built'); process.exitCode = 0;\n");
+  fs.writeFileSync(
+    config,
+    JSON.stringify({ schemaVersion: 1, commands: { build: { argv: [process.execPath, script] } } }),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["run", "build", "--config", config]);
+    assert.equal(exitCode, 0);
+    const result: unknown = JSON.parse(lines[0] ?? "{}");
+    assert.ok(isGenericCommandResult(result));
+    if (isGenericCommandResult(result)) {
+      assert.equal(result.command, "build");
+      assert.equal(result.status, "passed");
+      assert.equal(result.version, GENERIC_RESULT_SCHEMA_VERSION);
+      assert.match(result.stdout, /built/);
+      assert.ok(result.durationMs >= 0);
+    }
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("suzukuri run fails explicitly for an unregistered command name instead of any shell passthrough", async () => {
+  const { directory, config } = fixture("suzukuri-run-unknown-");
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["echo", "ok"] } } }));
+  try {
+    await assert.rejects(
+      () => runRunCommand({ positionals: ["deploy"], options: { config } }),
+      (error: unknown) => error instanceof RunCommandError && error.code === "RUN_COMMAND_NOT_FOUND",
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("suzukuri run requires a command name", async () => {
+  const { directory, config } = fixture("suzukuri-run-missing-name-");
+  fs.writeFileSync(config, JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["echo", "ok"] } } }));
+  try {
+    await assert.rejects(
+      () => runRunCommand({ positionals: [], options: { config } }),
+      (error: unknown) => error instanceof RunCommandError && error.code === "RUN_COMMAND_REQUIRED",
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a generic command's failed producer projects a bounded failed result with exit code and stderr", async () => {
+  const { directory, config } = fixture("suzukuri-run-generic-fail-");
+  const script = path.join(directory, "lint.mjs");
+  fs.writeFileSync(script, "console.error('lint error'); process.exitCode = 1;\n");
+  fs.writeFileSync(
+    config,
+    JSON.stringify({ schemaVersion: 1, commands: { lint: { argv: [process.execPath, script] } } }),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["run", "lint", "--config", config]);
+    assert.equal(exitCode, 1);
+    const result: unknown = JSON.parse(lines[0] ?? "{}");
+    assert.ok(isGenericCommandResult(result));
+    if (isGenericCommandResult(result)) {
+      assert.equal(result.status, "failed");
+      assert.equal(result.exitCode, 1);
+      assert.match(result.stderr, /lint error/);
+    }
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a generic command's ordered steps stop at the first failed step and report its name as stage", async () => {
+  const { directory, config } = fixture("suzukuri-run-generic-steps-");
+  const okScript = path.join(directory, "ok.mjs");
+  const brokenScript = path.join(directory, "broken.mjs");
+  const neverRunsScript = path.join(directory, "never-runs.mjs");
+  const marker = path.join(directory, "never-runs.marker");
+  fs.writeFileSync(okScript, "process.exitCode = 0;\n");
+  fs.writeFileSync(brokenScript, "console.error('typecheck failed'); process.exitCode = 1;\n");
+  fs.writeFileSync(neverRunsScript, `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(marker)}, "ran");\n`);
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: {
+        verify: {
+          steps: [
+            { name: "lint", argv: [process.execPath, okScript] },
+            { name: "typecheck", argv: [process.execPath, brokenScript] },
+            { name: "test", argv: [process.execPath, neverRunsScript] },
+          ],
+          projection: "generic",
+        },
+      },
+    }),
+  );
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runCli(["run", "verify", "--config", config]);
+    assert.equal(exitCode, 1);
+    const result: unknown = JSON.parse(lines[0] ?? "{}");
+    assert.ok(isGenericCommandResult(result));
+    if (isGenericCommandResult(result)) {
+      assert.equal(result.stage, "typecheck");
+      assert.match(result.stderr, /typecheck failed/);
+    }
+    assert.equal(fs.existsSync(marker), false, "a step after the failing one must never run");
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a generic command defaults to reuse "never" and never caches, even when unchanged', async () => {
+  const { repository, directory, config, counter } = gitFixture("suzukuri-run-reuse-never-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  console.log = () => {};
+  const script = path.join(directory, "deploy.mjs");
+  fs.writeFileSync(script, `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(counter)}, "x");\n`);
+  fs.writeFileSync(
+    config,
+    JSON.stringify({ schemaVersion: 1, commands: { deploy: { argv: [process.execPath, script] } } }),
+  );
+  try {
+    process.chdir(repository);
+    await runCli(["run", "deploy", "--config", config]);
+    await runCli(["run", "deploy", "--config", config]);
+    assert.equal(fs.readFileSync(counter, "utf8"), "xx", "a mutation-capable generic command must run every time");
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a generic command with explicit reuse "fingerprint" is cached like test/verify', async () => {
+  const { repository, directory, config, counter } = gitFixture("suzukuri-run-reuse-explicit-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => lines.push(line);
+  const script = path.join(directory, "lint.mjs");
+  fs.writeFileSync(script, `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(counter)}, "x");\n`);
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: { lint: { argv: [process.execPath, script], reuse: "fingerprint" } },
+    }),
+  );
+  try {
+    process.chdir(repository);
+    const first = await runCli(["run", "lint", "--config", config]);
+    assert.equal(first, 0);
+    assert.equal(fs.readFileSync(counter, "utf8"), "x");
+
+    const second = await runCli(["run", "lint", "--config", config]);
+    assert.equal(second, 0);
+    assert.equal(fs.readFileSync(counter, "utf8"), "x", "producer must not run a second time on a cache hit");
+    const cachedResult = JSON.parse(lines[1] ?? "{}") as Record<string, unknown>;
+    assert.equal(cachedResult.reused, true);
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("changing a registered command's projection invalidates any prior cached reuse", async () => {
+  const { repository, directory, config, counter } = gitFixture("suzukuri-run-reuse-projection-change-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  console.log = () => {};
+  const script = path.join(directory, "check.mjs");
+  fs.writeFileSync(script, `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(counter)}, "x");\n`);
+  const baseCommand = { argv: [process.execPath, script], reuse: "fingerprint" as const };
+  try {
+    process.chdir(repository);
+    fs.writeFileSync(
+      config,
+      JSON.stringify({ schemaVersion: 1, commands: { check: { ...baseCommand, projection: "generic" } } }),
+    );
+    await runCli(["run", "check", "--config", config]);
+    assert.equal(fs.readFileSync(counter, "utf8"), "x");
+
+    fs.writeFileSync(
+      config,
+      JSON.stringify({ schemaVersion: 1, commands: { check: { ...baseCommand, projection: "test-result" } } }),
+    );
+    await runCli(["run", "check", "--config", config]);
+    assert.equal(
+      fs.readFileSync(counter, "utf8"),
+      "xx",
+      "a changed projection must be a different cache key and re-run the producer",
+    );
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
