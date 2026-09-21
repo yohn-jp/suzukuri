@@ -128,7 +128,6 @@ const SKILL_SCENARIO_DEFINITIONS: readonly SkillScenarioDefinition[] = [
       },
       {
         summary: "Run the minimum focused check that proves the changed behavior.",
-        commandId: "verify",
       },
       {
         summary: "Run full required verification after the write-set stabilizes.",
@@ -206,7 +205,7 @@ const SKILL_SCENARIO_DEFINITIONS: readonly SkillScenarioDefinition[] = [
     scope: "specialized-alternative",
     delegatesTo: "bounded-implementation",
     workflow: [
-      { summary: "Run the focused check that proves the changed behavior.", commandId: "verify" },
+      { summary: "Run the focused check that proves the changed behavior." },
       { summary: "Run full required verification only after the write-set stabilizes.", commandId: "verify" },
       { summary: "Compare the actual diff and tests with the accepted contract, scope, and error paths." },
     ],

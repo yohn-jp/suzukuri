@@ -46,6 +46,22 @@ test("repository-operation teaches the canonical run route without producer bypa
   assert.doesNotMatch(rendered, /\b(pnpm|npm)\b/);
 });
 
+test("focused validation stays intent-only while full verification uses the verify contract", () => {
+  const bounded = findSkillScenario("bounded-implementation");
+  const review = findSkillScenario("validation-review");
+  assert.ok(bounded);
+  assert.ok(review);
+
+  const boundedFocused = bounded.workflow.find((step) => step.summary.includes("minimum focused"));
+  const boundedFull = bounded.workflow.find((step) => step.summary.includes("full required"));
+  const reviewFocused = review.workflow.find((step) => step.summary.includes("focused check"));
+  const reviewFull = review.workflow.find((step) => step.summary.includes("full required"));
+  assert.equal(boundedFocused?.commandId, undefined);
+  assert.equal(reviewFocused?.commandId, undefined);
+  assert.equal(boundedFull?.commandId, "verify");
+  assert.equal(reviewFull?.commandId, "verify");
+});
+
 test("text and JSON Skill projections share the structured model and stay bounded", () => {
   const indexJson = projectSkillIndexToJson();
   assert.equal(indexJson.version, SKILL_MODEL_VERSION);
