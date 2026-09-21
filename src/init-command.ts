@@ -52,10 +52,11 @@ interface CommandPlan {
   readonly kind: "single" | "steps";
   readonly argv?: readonly [string, ...string[]];
   readonly steps?: readonly StepPlan[];
+  readonly projection: "generic" | "test-result" | "verification-result";
 }
 
 interface ScriptMigration {
-  readonly scriptName: "test" | "verify";
+  readonly scriptName: string;
   readonly originalScript: string;
   readonly plan: CommandPlan | undefined;
   /** Set when the composite script could not be parsed safely and losslessly. */
@@ -66,12 +67,19 @@ export interface InitPlan {
   readonly packageManager: "pnpm" | "npm";
   readonly migrations: readonly ScriptMigration[];
   readonly commandsConfig: unknown;
-  readonly packageJsonScriptChanges: Readonly<Record<string, string>>;
+  readonly importedCommandCount: number;
   readonly addDevDependency: boolean;
   readonly alreadyInitialized: boolean;
 }
 
-/** Guided repository-adoption flow: inspect, propose, confirm, apply atomically. */
+/**
+ * Guided repository-adoption flow: inspect the existing package.json script
+ * vocabulary, propose importing it into `.suzukuri/commands.json` as the
+ * canonical Suzukuri command registry, show the full plan, confirm, apply
+ * atomically. Existing package.json scripts are left exactly as they are —
+ * this command establishes the registry, not a rewrite of the ecosystem's
+ * own lifecycle scripts.
+ */
 export async function runInitCommand(
   parsed: InitCommandArguments,
   dependencies: InitCommandDependencies = {},
@@ -85,8 +93,8 @@ export async function runInitCommand(
 
   printPlan(plan);
 
-  if (plan.migrations.every((migration) => migration.plan === undefined)) {
-    console.log("Nothing to migrate: no supported test/verify scripts were found or changes are already applied.");
+  if (plan.importedCommandCount === 0) {
+    console.log("Nothing to import: no supported scripts were found or the registry is already up to date.");
     return 0;
   }
 
@@ -119,18 +127,13 @@ function buildInitPlan(cwd: string): InitPlan {
   const scripts = packageJsonContent.scripts ?? {};
 
   const existingConfig = readExistingConfig(cwd);
-  const alreadyInitialized =
-    scripts.test === "suzukuri test" &&
-    scripts.verify === "suzukuri verify" &&
-    existingConfig !== undefined &&
-    packageJsonContent.devDependencies?.suzukuri !== undefined;
+  const existingCommands = existingConfig?.commands ?? {};
 
   const migrations: ScriptMigration[] = [];
-  for (const scriptName of ["test", "verify"] as const) {
+  for (const scriptName of Object.keys(scripts).sort()) {
     const script = scripts[scriptName];
-    if (script === undefined) continue;
-    if (script === `suzukuri ${scriptName}`) continue;
-    const plan = planForScript(script, scripts);
+    if (isAlreadyImported(existingCommands[scriptName], script)) continue;
+    const plan = planForScript(scriptName, script, scripts);
     migrations.push({
       scriptName,
       originalScript: script,
@@ -139,12 +142,12 @@ function buildInitPlan(cwd: string): InitPlan {
     });
   }
 
-  const commands: Record<string, unknown> = { ...(existingConfig?.commands ?? {}) };
-  const packageJsonScriptChanges: Record<string, string> = {};
+  const commands: Record<string, unknown> = { ...existingCommands };
+  let importedCommandCount = 0;
   for (const migration of migrations) {
     if (migration.plan === undefined) continue;
     commands[migration.scriptName] = commandPlanToConfig(migration.plan);
-    packageJsonScriptChanges[migration.scriptName] = `suzukuri ${migration.scriptName}`;
+    importedCommandCount += 1;
   }
 
   const commandsConfig = {
@@ -153,14 +156,25 @@ function buildInitPlan(cwd: string): InitPlan {
     commands,
   };
 
+  const addDevDependency = packageJsonContent.devDependencies?.suzukuri === undefined;
+  const alreadyInitialized = importedCommandCount === 0 && existingConfig !== undefined && !addDevDependency;
+
   return {
     packageManager,
     migrations,
     commandsConfig,
-    packageJsonScriptChanges,
-    addDevDependency: packageJsonContent.devDependencies?.suzukuri === undefined,
+    importedCommandCount,
+    addDevDependency,
     alreadyInitialized,
   };
+}
+
+/** A script already represented in the registry under an unchanged argv is not re-proposed, making re-runs idempotent. */
+function isAlreadyImported(existing: unknown, script: string): boolean {
+  if (!isRecord(existing) || !Array.isArray(existing.argv)) return false;
+  const tokenized = tokenize(script);
+  if (tokenized === undefined) return false;
+  return JSON.stringify(existing.argv) === JSON.stringify(tokenized);
 }
 
 function detectPackageManager(cwd: string): "pnpm" | "npm" {
@@ -204,14 +218,27 @@ function readExistingConfig(cwd: string): { commands: Record<string, unknown> } 
 type ScriptPlanResult =
   { readonly ok: true; readonly plan: CommandPlan } | { readonly ok: false; readonly reason: string };
 
+/** The known semantic projection for a repository-vocabulary command name, or "generic" for anything else. */
+function projectionForName(scriptName: string): CommandPlan["projection"] {
+  if (scriptName === "test") return "test-result";
+  if (scriptName === "verify") return "verification-result";
+  return "generic";
+}
+
 /**
  * Interprets an existing package script into a suzukuri command plan. A
  * simple script becomes a single producer; a `&&`-joined composite of
  * `pnpm run <script>` / `npm run <script>` segments becomes ordered steps
  * naming each referenced script. Anything else is reported unresolved rather
- * than guessed, per the issue's fail-closed requirement.
+ * than guessed, per the issue's fail-closed requirement. Producer behavior
+ * is preserved exactly — no new validation stage is invented.
  */
-function planForScript(script: string, scripts: Readonly<Record<string, string>>): ScriptPlanResult {
+function planForScript(
+  scriptName: string,
+  script: string,
+  scripts: Readonly<Record<string, string>>,
+): ScriptPlanResult {
+  const projection = projectionForName(scriptName);
   const segments = splitTopLevelAnd(script);
   if (segments === undefined) {
     return { ok: false, reason: "The script contains shell syntax that cannot be split safely and losslessly." };
@@ -221,7 +248,7 @@ function planForScript(script: string, scripts: Readonly<Record<string, string>>
     if (argv === undefined) {
       return { ok: false, reason: "The script could not be tokenized safely into an argv array." };
     }
-    return { ok: true, plan: { kind: "single", argv } };
+    return { ok: true, plan: { kind: "single", argv, projection } };
   }
   const steps: StepPlan[] = [];
   for (const segment of segments) {
@@ -232,8 +259,8 @@ function planForScript(script: string, scripts: Readonly<Record<string, string>>
         reason: `The composite script step "${segment}" is not a plain "pnpm run <script>"/"npm run <script>" call.`,
       };
     }
-    if (referencedScript === "verify") {
-      return { ok: false, reason: 'A composite script step must not recursively invoke "verify".' };
+    if (referencedScript === scriptName) {
+      return { ok: false, reason: `A composite script step must not recursively invoke "${scriptName}".` };
     }
     if (scripts[referencedScript] === undefined) {
       return { ok: false, reason: `The composite script references undefined script "${referencedScript}".` };
@@ -244,7 +271,7 @@ function planForScript(script: string, scripts: Readonly<Record<string, string>>
     }
     steps.push({ name: referencedScript, argv });
   }
-  return { ok: true, plan: { kind: "steps", steps } };
+  return { ok: true, plan: { kind: "steps", steps, projection } };
 }
 
 function matchRunScript(segment: string): string | undefined {
@@ -308,16 +335,17 @@ function tokenize(command: string): [string, ...string[]] | undefined {
 }
 
 function commandPlanToConfig(plan: CommandPlan): unknown {
+  const projection = plan.projection === "generic" ? {} : { projection: plan.projection };
   if (plan.kind === "single") {
-    return { argv: plan.argv };
+    return { argv: plan.argv, ...projection };
   }
-  return { steps: plan.steps?.map((step) => ({ name: step.name, argv: step.argv })) };
+  return { steps: plan.steps?.map((step) => ({ name: step.name, argv: step.argv })), ...projection };
 }
 
 function printPlan(plan: InitPlan): void {
   console.log(`Detected package manager: ${plan.packageManager}`);
   if (plan.alreadyInitialized) {
-    console.log("Repository is already initialized for suzukuri test/verify. Re-running is a no-op.");
+    console.log("Repository command registry is already up to date. Re-running is a no-op.");
     return;
   }
   for (const migration of plan.migrations) {
@@ -325,18 +353,16 @@ function printPlan(plan: InitPlan): void {
       console.log(`- ${migration.scriptName}: left unchanged (${migration.unresolvedReason})`);
       continue;
     }
-    console.log(`- ${migration.scriptName}: package.json script -> "suzukuri ${migration.scriptName}"`);
+    console.log(
+      `- ${migration.scriptName}: import as ${migration.plan.kind === "steps" ? "ordered steps" : "a single producer"} (${migration.plan.projection})`,
+    );
   }
-  if (Object.keys(plan.packageJsonScriptChanges).length > 0) {
+  if (plan.importedCommandCount > 0) {
     console.log("\nProposed .suzukuri/commands.json:");
     console.log(stableJsonStringify(plan.commandsConfig));
-    console.log("\nProposed package.json script changes:");
-    for (const [name, value] of Object.entries(plan.packageJsonScriptChanges)) {
-      console.log(`  ${name}: "${value}"`);
-    }
-    if (plan.addDevDependency) {
-      console.log(`\nProposed devDependency: suzukuri@${packageJson.version}`);
-    }
+  }
+  if (plan.addDevDependency) {
+    console.log(`\nProposed devDependency: suzukuri@${packageJson.version}`);
   }
 }
 
@@ -353,38 +379,35 @@ function promptConfirm(question: string): Promise<boolean> {
 /**
  * Applies the accepted plan by writing every changed file to a temporary
  * path first and renaming only once all writes have succeeded, so a
- * mid-apply failure cannot leave package.json scripts pointing at a
- * .suzukuri/commands.json that was never written.
+ * mid-apply failure cannot leave a half-migrated command registry (e.g. a
+ * devDependency added without the registry file, or vice versa).
  */
 function applyInitPlan(cwd: string, plan: InitPlan): void {
-  if (Object.keys(plan.packageJsonScriptChanges).length === 0) return;
-
   const configDirectory = path.join(cwd, path.dirname(DEFAULT_EXECUTION_CONFIG_PATH));
   const configPath = path.join(cwd, DEFAULT_EXECUTION_CONFIG_PATH);
-  const packageJsonPath = path.join(cwd, "package.json");
-  const packageJsonContent = readPackageJson(packageJsonPath);
-  // Recomputed from the just-read package.json rather than trusting
-  // plan.addDevDependency, which was decided before the confirmation prompt
-  // and could be stale if package.json changed in that window.
-  const addDevDependency = packageJsonContent.devDependencies?.suzukuri === undefined;
-
-  const nextPackageJson: PackageJson = {
-    ...packageJsonContent,
-    scripts: { ...packageJsonContent.scripts, ...plan.packageJsonScriptChanges },
-    ...(addDevDependency
-      ? {
-          devDependencies: {
-            ...packageJsonContent.devDependencies,
-            suzukuri: `^${packageJson.version}`,
-          },
-        }
-      : {}),
-  };
-
   fs.mkdirSync(configDirectory, { recursive: true });
   const configTemp = `${configPath}.${process.pid}.tmp`;
-  const packageJsonTemp = `${packageJsonPath}.${process.pid}.tmp`;
   fs.writeFileSync(configTemp, `${JSON.stringify(plan.commandsConfig, null, 2)}\n`);
+
+  if (!plan.addDevDependency) {
+    fs.renameSync(configTemp, configPath);
+    return;
+  }
+
+  const packageJsonPath = path.join(cwd, "package.json");
+  const packageJsonContent = readPackageJson(packageJsonPath);
+  // Recomputed from the just-read package.json rather than trusting a
+  // plan-time decision, which was made before the confirmation prompt and
+  // could be stale if package.json changed in that window.
+  if (packageJsonContent.devDependencies?.suzukuri !== undefined) {
+    fs.renameSync(configTemp, configPath);
+    return;
+  }
+  const nextPackageJson: PackageJson = {
+    ...packageJsonContent,
+    devDependencies: { ...packageJsonContent.devDependencies, suzukuri: `^${packageJson.version}` },
+  };
+  const packageJsonTemp = `${packageJsonPath}.${process.pid}.tmp`;
   fs.writeFileSync(packageJsonTemp, `${JSON.stringify(nextPackageJson, null, 2)}\n`);
   fs.renameSync(configTemp, configPath);
   fs.renameSync(packageJsonTemp, packageJsonPath);
@@ -392,10 +415,13 @@ function applyInitPlan(cwd: string, plan: InitPlan): void {
 
 function validateAppliedPlan(cwd: string): void {
   const configPath = path.join(cwd, DEFAULT_EXECUTION_CONFIG_PATH);
-  if (!fs.existsSync(configPath)) return;
   parseExecutionConfig(JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown);
 }
 
 function hasOption(parsed: InitCommandArguments, ...names: string[]): boolean {
   return names.some((name) => parsed.options[name] !== undefined);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

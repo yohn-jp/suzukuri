@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { InitCommandError, runInitCommand } from "./init-command.js";
-import { parseExecutionConfig } from "./execution.js";
+import { isSteppedExecutionCommand, parseExecutionConfig } from "./execution.js";
 
 function repository(prefix: string, packageJson: Record<string, unknown>): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -28,10 +28,11 @@ test("init proposes a migration plan without mutating files when declined", asyn
   const directory = repository("suzukuri-init-decline-", {
     name: "wabachi",
     scripts: {
+      build: "tsc -p tsconfig.build.json",
       test: "node --test --import tsx src/**/*.test.ts",
-      verify: "pnpm run format:check && pnpm run lint && pnpm test",
-      "format:check": "prettier --check .",
       lint: "eslint .",
+      "format:check": "prettier --check .",
+      verify: "pnpm run format:check && pnpm run lint && pnpm test",
     },
   });
   try {
@@ -58,19 +59,20 @@ test("init proposes a migration plan without mutating files when declined", asyn
   }
 });
 
-test("init applies an accepted migration atomically: rewires scripts, writes commands.json, adds the dependency", async () => {
+test("init imports the full script vocabulary (build/lint/format/test/verify) with known semantics assigned the right projection", async () => {
   const directory = repository("suzukuri-init-accept-", {
     name: "wabachi",
     version: "1.0.0",
     scripts: {
+      build: "tsc -p tsconfig.build.json",
       test: "node --test --import tsx src/**/*.test.ts scripts/**/*.test.mjs",
-      verify:
-        "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run governance:actions && pnpm run test:package",
+      lint: "eslint src/**/*.ts",
       "format:check": "prettier --check .",
-      lint: "eslint .",
       typecheck: "tsc --noEmit",
       "governance:actions": "node scripts/validate-actions.mjs",
       "test:package": "node scripts/run-package-suite.mjs",
+      verify:
+        "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run governance:actions && pnpm run test:package",
     },
   });
   try {
@@ -83,17 +85,27 @@ test("init applies an accepted migration atomically: rewires scripts, writes com
       scripts: Record<string, string>;
       devDependencies: Record<string, string>;
     };
-    assert.equal(packageJson.scripts.test, "suzukuri test");
-    assert.equal(packageJson.scripts.verify, "suzukuri verify");
+    // package.json scripts are left exactly as they were.
+    assert.equal(packageJson.scripts.build, "tsc -p tsconfig.build.json");
+    assert.equal(packageJson.scripts.test, "node --test --import tsx src/**/*.test.ts scripts/**/*.test.mjs");
     assert.ok(packageJson.devDependencies.suzukuri !== undefined);
 
     const configRaw = JSON.parse(
       fs.readFileSync(path.join(directory, ".suzukuri", "commands.json"), "utf8"),
     ) as unknown;
     const config = parseExecutionConfig(configRaw);
+
+    const build = config.commands.build;
+    assert.ok(build !== undefined && !isSteppedExecutionCommand(build));
+    if (build !== undefined && !isSteppedExecutionCommand(build)) {
+      assert.deepEqual(build.argv, ["tsc", "-p", "tsconfig.build.json"]);
+      assert.equal(build.projection, "generic");
+    }
+
     const testCommand = config.commands.test;
-    assert.ok(testCommand !== undefined && "argv" in testCommand);
-    if (testCommand !== undefined && "argv" in testCommand) {
+    assert.ok(testCommand !== undefined && !isSteppedExecutionCommand(testCommand));
+    if (testCommand !== undefined && !isSteppedExecutionCommand(testCommand)) {
+      assert.equal(testCommand.projection, "test-result");
       assert.deepEqual(testCommand.argv, [
         "node",
         "--test",
@@ -103,9 +115,14 @@ test("init applies an accepted migration atomically: rewires scripts, writes com
         "scripts/**/*.test.mjs",
       ]);
     }
+
+    const lint = config.commands.lint;
+    assert.ok(lint !== undefined && !isSteppedExecutionCommand(lint) && lint.projection === "generic");
+
     const verifyCommand = config.commands.verify;
-    assert.ok(verifyCommand !== undefined && "steps" in verifyCommand);
-    if (verifyCommand !== undefined && "steps" in verifyCommand) {
+    assert.ok(verifyCommand !== undefined && isSteppedExecutionCommand(verifyCommand));
+    if (verifyCommand !== undefined && isSteppedExecutionCommand(verifyCommand)) {
+      assert.equal(verifyCommand.projection, "verification-result");
       assert.deepEqual(
         verifyCommand.steps.map((step) => step.name),
         ["format:check", "lint", "typecheck", "test", "governance:actions", "test:package"],
@@ -131,11 +148,12 @@ test("init leaves an unparsable composite verify script unchanged and reports it
       runInitCommand({ positionals: [], options: {} }, { cwd: directory, confirm: async () => true }),
     );
     assert.equal(await exitCode, 0);
-    assert.equal(fs.existsSync(path.join(directory, ".suzukuri", "commands.json")), false);
-    const packageJsonAfter = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8")) as {
-      scripts: Record<string, string>;
-    };
-    assert.equal(packageJsonAfter.scripts.verify, "pnpm run lint || pnpm run fallback");
+    const configRaw = JSON.parse(
+      fs.readFileSync(path.join(directory, ".suzukuri", "commands.json"), "utf8"),
+    ) as unknown;
+    const config = parseExecutionConfig(configRaw);
+    assert.equal(config.commands.verify, undefined, "the unresolvable verify script must not be imported");
+    assert.ok(config.commands.lint !== undefined, "the independently resolvable lint script is still imported");
     assert.ok(lines.some((line) => line.includes("left unchanged")));
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -145,20 +163,49 @@ test("init leaves an unparsable composite verify script unchanged and reports it
 test("re-running init on an already initialized repository is an explicit no-op", async () => {
   const directory = repository("suzukuri-init-idempotent-", {
     name: "wabachi",
-    scripts: { test: "suzukuri test", verify: "suzukuri verify" },
+    scripts: { build: "tsc" },
     devDependencies: { suzukuri: "^1.0.0" },
   });
   fs.mkdirSync(path.join(directory, ".suzukuri"));
   fs.writeFileSync(
     path.join(directory, ".suzukuri", "commands.json"),
-    JSON.stringify({ schemaVersion: 1, commands: { test: { argv: ["node", "--test"] } } }),
+    JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["tsc"] } } }),
   );
   try {
     const { result: exitCode, lines } = withCapturedLog(() =>
       runInitCommand({ positionals: [], options: {} }, { cwd: directory, confirm: async () => true }),
     );
     assert.equal(await exitCode, 0);
-    assert.ok(lines.some((line) => line.includes("already initialized")));
+    assert.ok(lines.some((line) => line.includes("already up to date")));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("re-running init after adding a new script proposes only the new command, not a full re-import", async () => {
+  const directory = repository("suzukuri-init-incremental-", {
+    name: "wabachi",
+    scripts: { build: "tsc", lint: "eslint ." },
+    devDependencies: { suzukuri: "^1.0.0" },
+  });
+  fs.mkdirSync(path.join(directory, ".suzukuri"));
+  fs.writeFileSync(
+    path.join(directory, ".suzukuri", "commands.json"),
+    JSON.stringify({ schemaVersion: 1, commands: { build: { argv: ["tsc"] } } }),
+  );
+  try {
+    const { result: exitCode, lines } = withCapturedLog(() =>
+      runInitCommand({ positionals: [], options: {} }, { cwd: directory, confirm: async () => true }),
+    );
+    assert.equal(await exitCode, 0);
+    assert.ok(lines.some((line) => line.includes("lint: import")));
+    assert.ok(!lines.some((line) => line.includes("build: import")), "an unchanged script must not be re-proposed");
+
+    const config = parseExecutionConfig(
+      JSON.parse(fs.readFileSync(path.join(directory, ".suzukuri", "commands.json"), "utf8")) as unknown,
+    );
+    assert.ok(config.commands.build !== undefined);
+    assert.ok(config.commands.lint !== undefined);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -179,7 +226,7 @@ test("init reports an unsupported ecosystem explicitly instead of guessing", asy
 test("--yes bypasses the confirmation prompt entirely", async () => {
   const directory = repository("suzukuri-init-yes-", {
     name: "wabachi",
-    scripts: { test: "node --test" },
+    scripts: { build: "tsc" },
   });
   try {
     let confirmCalled = false;
@@ -198,7 +245,7 @@ test("--yes bypasses the confirmation prompt entirely", async () => {
 test("--dry-run prints the plan and never mutates or prompts", async () => {
   const directory = repository("suzukuri-init-dry-run-", {
     name: "wabachi",
-    scripts: { test: "node --test" },
+    scripts: { build: "tsc" },
   });
   try {
     let confirmCalled = false;

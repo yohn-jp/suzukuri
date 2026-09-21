@@ -32,7 +32,11 @@ function cleanup(directory: string): void {
 test("a lookup miss followed by a commit is served as a hit for identical content and command", async () => {
   const directory = initRepository("suzukuri-cache-hit-");
   try {
-    const command = { argv: ["node", "producer.mjs"] as const };
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
     const miss = await lookupExecutionCache("test", command, { cwd: directory });
     assert.ok(miss !== undefined);
     assert.equal(miss.cached, undefined);
@@ -50,7 +54,11 @@ test("a lookup miss followed by a commit is served as a hit for identical conten
 test("a one-byte included change invalidates the cached entry", async () => {
   const directory = initRepository("suzukuri-cache-invalidate-");
   try {
-    const command = { argv: ["node", "producer.mjs"] as const };
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
     const before = await lookupExecutionCache("test", command, { cwd: directory });
     assert.ok(before !== undefined);
     await before.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
@@ -67,8 +75,16 @@ test("a one-byte included change invalidates the cached entry", async () => {
 test("different producer definitions cannot reuse each other's cached result", async () => {
   const directory = initRepository("suzukuri-cache-separation-");
   try {
-    const commandA = { argv: ["node", "a.mjs"] as const };
-    const commandB = { argv: ["node", "b.mjs"] as const };
+    const commandA = {
+      argv: ["node", "a.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
+    const commandB = {
+      argv: ["node", "b.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
     const lookupA = await lookupExecutionCache("test", commandA, { cwd: directory });
     assert.ok(lookupA !== undefined);
     await lookupA.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
@@ -84,7 +100,11 @@ test("different producer definitions cannot reuse each other's cached result", a
 test("test and verify commands cannot reuse each other's cached result for the same producer definition", async () => {
   const directory = initRepository("suzukuri-cache-command-separation-");
   try {
-    const command = { argv: ["node", "producer.mjs"] as const };
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
     const testLookup = await lookupExecutionCache("test", command, { cwd: directory });
     assert.ok(testLookup !== undefined);
     await testLookup.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
@@ -100,7 +120,11 @@ test("test and verify commands cannot reuse each other's cached result for the s
 test("a failed result is reusable while execution identity remains identical", async () => {
   const directory = initRepository("suzukuri-cache-failed-reuse-");
   try {
-    const command = { argv: ["node", "producer.mjs"] as const };
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
     const lookup = await lookupExecutionCache("verify", command, { cwd: directory });
     assert.ok(lookup !== undefined);
     await lookup.commit({ exitCode: 1, signal: null, printed: { status: "failed", stage: "lint" } });
@@ -116,7 +140,11 @@ test("a failed result is reusable while execution identity remains identical", a
 test("fingerprint acquisition failure fails closed to a cache miss", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-cache-not-git-"));
   try {
-    const command = { argv: ["node", "producer.mjs"] as const };
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
     const lookup = await lookupExecutionCache("test", command, { cwd: directory });
     assert.equal(lookup, undefined);
   } finally {
@@ -127,7 +155,11 @@ test("fingerprint acquisition failure fails closed to a cache miss", async () =>
 test("a repository content change between lookup and commit is not cached", async () => {
   const directory = initRepository("suzukuri-cache-race-");
   try {
-    const command = { argv: ["node", "producer.mjs"] as const };
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
     const lookup = await lookupExecutionCache("test", command, { cwd: directory });
     assert.ok(lookup !== undefined);
 
@@ -167,7 +199,11 @@ test("cache state is bounded: it never grows past the configured maximum entry c
     const maxEntries = 3;
     for (let index = 0; index < maxEntries + 5; index += 1) {
       fs.writeFileSync(path.join(directory, "a.txt"), `alpha-${index}`);
-      const command = { argv: ["node", `producer-${index}.mjs`] as const };
+      const command = {
+        argv: ["node", `producer-${index}.mjs`] as const,
+        projection: "generic" as const,
+        reuse: "fingerprint" as const,
+      };
       const lookup = await lookupExecutionCache("test", command, { cwd: directory, maxEntries });
       assert.ok(lookup !== undefined);
       await lookup.commit({ exitCode: 0, signal: null, printed: { status: "passed", index } });
@@ -183,7 +219,11 @@ test("bounded eviction discards the oldest entries first and keeps the most rece
   const directory = initRepository("suzukuri-cache-evict-oldest-");
   try {
     const maxEntries = 2;
-    const command = (index: number) => ({ argv: ["node", `producer-${index}.mjs`] as const });
+    const command = (index: number) => ({
+      argv: ["node", `producer-${index}.mjs`] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    });
     for (let index = 0; index < 3; index += 1) {
       fs.writeFileSync(path.join(directory, "a.txt"), `alpha-${index}`);
       const lookup = await lookupExecutionCache("test", command(index), { cwd: directory, maxEntries });
@@ -202,6 +242,25 @@ test("bounded eviction discards the oldest entries first and keeps the most rece
     const newest = await lookupExecutionCache("test", command(2), { cwd: directory, maxEntries });
     assert.ok(newest !== undefined);
     assert.deepEqual(newest.cached?.printed, { status: "passed", index: 2 });
+  } finally {
+    cleanup(directory);
+  }
+});
+
+test('a command declared reuse "never" fails closed to a live run instead of ever reading or writing the cache', async () => {
+  const directory = initRepository("suzukuri-cache-reuse-never-");
+  try {
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "generic" as const,
+      reuse: "never" as const,
+    };
+    const first = await lookupExecutionCache("test", command, { cwd: directory });
+    assert.equal(first, undefined, 'a "never" command must never produce a usable lookup, even on the first call');
+
+    // Prove nothing was written: the cache directory must not exist for a
+    // "never" command.
+    assert.equal(cacheEntryCount(directory), 0);
   } finally {
     cleanup(directory);
   }

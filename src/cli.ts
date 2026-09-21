@@ -4,6 +4,7 @@ import { type ComponentReference, createBudget, stableJsonStringify } from "./co
 import { runDiffCommand } from "./diff-command.js";
 import { runInitCommand } from "./init-command.js";
 import { createProfileCore } from "./profile-builtins.js";
+import { runRunCommand } from "./run-command.js";
 import { runTestCommand } from "./test-command.js";
 import { runVerifyCommand } from "./verify-command.js";
 import {
@@ -88,6 +89,9 @@ export async function runCli(argv: string[]): Promise<number> {
     if (hasOption(parsed, "help", "h")) {
       printHelpFor(parsed.positionals, parsed.options.help);
       return 0;
+    }
+    if (command === "run") {
+      return await runRunCommand({ positionals: parsed.positionals.slice(1), options: parsed.options });
     }
     if (command === "test") {
       return await runTestCommand({ positionals: parsed.positionals.slice(1), options: parsed.options });
