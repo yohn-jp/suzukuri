@@ -9,6 +9,16 @@ import { isSteppedExecutionCommand, parseExecutionConfig } from "./execution.js"
 function repository(prefix: string, packageJson: Record<string, unknown>): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify(packageJson, null, 2));
+  const localSuzukuri = path.join(directory, ".suzukuri-test-package");
+  fs.mkdirSync(localSuzukuri);
+  fs.writeFileSync(
+    path.join(localSuzukuri, "package.json"),
+    JSON.stringify({ name: "suzukuri", version: "0.0.0" }, null, 2),
+  );
+  fs.writeFileSync(
+    path.join(directory, "pnpm-workspace.yaml"),
+    "overrides:\n  suzukuri: file:./.suzukuri-test-package\n",
+  );
   fs.writeFileSync(path.join(directory, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
   return directory;
 }
