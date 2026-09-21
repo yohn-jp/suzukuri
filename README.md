@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/assets/readme/suzukuri-hero.webp" alt="Suzukuri — Bounded Semantic Views. Find the right information. Build with confidence." width="100%">
+</p>
+
 # Suzukuri
 
 Suzukuri is a deterministic, bounded semantic view engine. It provides an explicit adapter → semantic-contract → view → renderer pipeline for CLI and TypeScript library consumers.
