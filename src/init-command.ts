@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { stableJsonStringify } from "./core.js";
 import { DEFAULT_EXECUTION_CONFIG_PATH, EXECUTION_SCHEMA_VERSION, parseExecutionConfig } from "./execution.js";
 
@@ -70,15 +71,58 @@ export interface InitPlan {
   readonly importedCommandCount: number;
   readonly addDevDependency: boolean;
   readonly alreadyInitialized: boolean;
+  /** package.json scripts to remove once imported, so `suzukuri run <name>` becomes the sole agent-facing entry point. */
+  readonly scriptsToRemove: readonly string[];
+  /** npm/pnpm lifecycle scripts whose body must be rewritten to call `suzukuri run <name>` because they reference a script being removed. */
+  readonly lifecycleRewrites: Readonly<Record<string, string>>;
 }
+
+/**
+ * npm/pnpm lifecycle hook names that the package manager invokes directly
+ * (on install/pack/publish/version) rather than a human or agent running
+ * `pnpm run <name>`. These are ecosystem plumbing, not repository-operation
+ * vocabulary, so they are never migrated into the registry and are never
+ * removed from package.json — only rewritten in place if their body invokes
+ * a script that is being migrated out.
+ */
+const NPM_LIFECYCLE_SCRIPT_NAMES: ReadonlySet<string> = new Set([
+  "preinstall",
+  "install",
+  "postinstall",
+  "preuninstall",
+  "uninstall",
+  "postuninstall",
+  "prepublish",
+  "preprepare",
+  "prepare",
+  "postprepare",
+  "prepack",
+  "postpack",
+  "prepublishOnly",
+  "publish",
+  "postpublish",
+  "preversion",
+  "version",
+  "postversion",
+  "pretest",
+  "posttest",
+  "prestart",
+  "poststart",
+  "prestop",
+  "poststop",
+  "prerestart",
+  "postrestart",
+]);
 
 /**
  * Guided repository-adoption flow: inspect the existing package.json script
  * vocabulary, propose importing it into `.suzukuri/commands.json` as the
- * canonical Suzukuri command registry, show the full plan, confirm, apply
- * atomically. Existing package.json scripts are left exactly as they are —
- * this command establishes the registry, not a rewrite of the ecosystem's
- * own lifecycle scripts.
+ * canonical Suzukuri command registry, show the full plan, confirm, apply.
+ * Every imported script is removed from package.json so `suzukuri run
+ * <name>` becomes the sole agent-facing entry point; only npm/pnpm lifecycle
+ * hooks (prepare, prepack, prepublishOnly, etc.) are left in package.json,
+ * rewritten in place to call `suzukuri run <name>` if they referenced a
+ * script that was just removed.
  */
 export async function runInitCommand(
   parsed: InitCommandArguments,
@@ -93,8 +137,7 @@ export async function runInitCommand(
 
   printPlan(plan);
 
-  if (plan.importedCommandCount === 0) {
-    console.log("Nothing to import: no supported scripts were found or the registry is already up to date.");
+  if (plan.alreadyInitialized) {
     return 0;
   }
 
@@ -132,7 +175,7 @@ function buildInitPlan(cwd: string): InitPlan {
   const migrations: ScriptMigration[] = [];
   for (const scriptName of Object.keys(scripts).sort()) {
     const script = scripts[scriptName];
-    if (isAlreadyImported(existingCommands[scriptName], script)) continue;
+    if (isAlreadyImported(existingCommands[scriptName], scriptName, script, scripts)) continue;
     const plan = planForScript(scriptName, script, scripts);
     migrations.push({
       scriptName,
@@ -156,8 +199,25 @@ function buildInitPlan(cwd: string): InitPlan {
     commands,
   };
 
+  // Every non-lifecycle script that ends up represented in the registry
+  // (whether imported just now or already present from a prior run) is
+  // removed from package.json, so `pnpm run <name>` stops being a viable
+  // agent-facing alternative to `suzukuri run <name>`. Lifecycle hooks and
+  // unresolved (unresolvable) scripts are left in package.json untouched.
+  const scriptsToRemove = Object.keys(scripts)
+    .filter((scriptName) => !NPM_LIFECYCLE_SCRIPT_NAMES.has(scriptName))
+    .filter((scriptName) => commands[scriptName] !== undefined)
+    .sort();
+
+  const lifecycleRewrites = computeLifecycleRewrites(scripts, scriptsToRemove);
+
   const addDevDependency = packageJsonContent.devDependencies?.suzukuri === undefined;
-  const alreadyInitialized = importedCommandCount === 0 && existingConfig !== undefined && !addDevDependency;
+  const alreadyInitialized =
+    importedCommandCount === 0 &&
+    existingConfig !== undefined &&
+    !addDevDependency &&
+    scriptsToRemove.length === 0 &&
+    Object.keys(lifecycleRewrites).length === 0;
 
   return {
     packageManager,
@@ -165,16 +225,47 @@ function buildInitPlan(cwd: string): InitPlan {
     commandsConfig,
     importedCommandCount,
     addDevDependency,
+    scriptsToRemove,
+    lifecycleRewrites,
     alreadyInitialized,
   };
 }
 
-/** A script already represented in the registry under an unchanged argv is not re-proposed, making re-runs idempotent. */
-function isAlreadyImported(existing: unknown, script: string): boolean {
-  if (!isRecord(existing) || !Array.isArray(existing.argv)) return false;
-  const tokenized = tokenize(script);
-  if (tokenized === undefined) return false;
-  return JSON.stringify(existing.argv) === JSON.stringify(tokenized);
+/**
+ * A script already represented in the registry under an unchanged shape is
+ * not re-proposed, making re-runs idempotent. Compares against whichever
+ * plan `planForScript` would currently produce for this script, so both
+ * single-argv and ordered-steps commands are recognized as already
+ * imported rather than only the single-argv shape. Both sides are run
+ * through `parseExecutionConfig`'s own normalization (which fills in
+ * default `projection`/`reuse`) before comparing, so an existing entry
+ * written with implicit defaults compares equal to a freshly generated one
+ * that also relies on those same defaults.
+ */
+function isAlreadyImported(
+  existing: unknown,
+  scriptName: string,
+  script: string,
+  scripts: Readonly<Record<string, string>>,
+): boolean {
+  if (!isRecord(existing)) return false;
+  const result = planForScript(scriptName, script, scripts);
+  if (!result.ok) return false;
+  const candidate = commandPlanToConfig(result.plan);
+  const normalizedExisting = normalizeCommandForComparison(scriptName, existing);
+  const normalizedCandidate = normalizeCommandForComparison(scriptName, candidate);
+  if (normalizedExisting === undefined || normalizedCandidate === undefined) return false;
+  return JSON.stringify(normalizedExisting) === JSON.stringify(normalizedCandidate);
+}
+
+/** Normalizes a single command definition through the same schema the registry file is validated against, or undefined if it doesn't parse. */
+function normalizeCommandForComparison(scriptName: string, command: unknown): unknown {
+  try {
+    return parseExecutionConfig({ schemaVersion: EXECUTION_SCHEMA_VERSION, commands: { [scriptName]: command } })
+      .commands[scriptName];
+  } catch {
+    return undefined;
+  }
 }
 
 function detectPackageManager(cwd: string): "pnpm" | "npm" {
@@ -204,14 +295,34 @@ function readPackageJson(packageJsonPath: string): PackageJson {
   }
 }
 
+/**
+ * A missing registry is a legitimate "not yet initialized" state, but an
+ * existing, unparsable registry is not: silently treating it as absent would
+ * let init generate a fresh registry and, on confirmation, overwrite the
+ * broken file — destroying whatever was there. Fail closed instead.
+ */
 function readExistingConfig(cwd: string): { commands: Record<string, unknown> } | undefined {
   const configPath = path.join(cwd, DEFAULT_EXECUTION_CONFIG_PATH);
   if (!fs.existsSync(configPath)) return undefined;
+  let raw: unknown;
   try {
-    const parsed = parseExecutionConfig(JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown);
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch (error) {
+    throw new InitCommandError(
+      "INIT_EXISTING_CONFIG_INVALID",
+      `${DEFAULT_EXECUTION_CONFIG_PATH} exists but is not valid JSON. Fix or remove it before running suzukuri init.`,
+      { reason: error instanceof Error ? error.message : String(error) },
+    );
+  }
+  try {
+    const parsed = parseExecutionConfig(raw);
     return { commands: parsed.commands as Record<string, unknown> };
-  } catch {
-    return undefined;
+  } catch (error) {
+    throw new InitCommandError(
+      "INIT_EXISTING_CONFIG_INVALID",
+      `${DEFAULT_EXECUTION_CONFIG_PATH} exists but does not match the execution command schema. Fix or remove it before running suzukuri init.`,
+      { reason: error instanceof Error ? error.message : String(error) },
+    );
   }
 }
 
@@ -272,6 +383,37 @@ function planForScript(
     steps.push({ name: referencedScript, argv });
   }
   return { ok: true, plan: { kind: "steps", steps, projection } };
+}
+
+/**
+ * Lifecycle hooks are never removed, but a hook that invokes a script being
+ * migrated out (e.g. `prepack: "pnpm run build"`) must keep working once
+ * that script disappears from package.json. Each `&&`-joined segment that is
+ * a plain `pnpm run <script>`/`npm run <script>`/`pnpm test`/`npm test` call
+ * naming a removed script is rewritten to `suzukuri run <script>`; anything
+ * else in the hook body is left untouched. A hook with no reference to a
+ * removed script is omitted from the result.
+ */
+function computeLifecycleRewrites(
+  scripts: Readonly<Record<string, string>>,
+  scriptsToRemove: readonly string[],
+): Record<string, string> {
+  const removed = new Set(scriptsToRemove);
+  const rewrites: Record<string, string> = {};
+  for (const [scriptName, script] of Object.entries(scripts)) {
+    if (!NPM_LIFECYCLE_SCRIPT_NAMES.has(scriptName)) continue;
+    const segments = splitTopLevelAnd(script);
+    if (segments === undefined) continue;
+    let changed = false;
+    const rewritten = segments.map((segment) => {
+      const referencedScript = matchRunScript(segment);
+      if (referencedScript === undefined || !removed.has(referencedScript)) return segment;
+      changed = true;
+      return `suzukuri run ${referencedScript}`;
+    });
+    if (changed) rewrites[scriptName] = rewritten.join(" && ");
+  }
+  return rewrites;
 }
 
 function matchRunScript(segment: string): string | undefined {
@@ -361,6 +503,14 @@ function printPlan(plan: InitPlan): void {
     console.log("\nProposed .suzukuri/commands.json:");
     console.log(stableJsonStringify(plan.commandsConfig));
   }
+  if (plan.scriptsToRemove.length > 0) {
+    console.log(
+      `\npackage.json scripts to remove (now reachable only via suzukuri run): ${plan.scriptsToRemove.join(", ")}`,
+    );
+  }
+  for (const [scriptName, rewritten] of Object.entries(plan.lifecycleRewrites)) {
+    console.log(`package.json lifecycle script "${scriptName}" will be rewritten to: ${rewritten}`);
+  }
   if (plan.addDevDependency) {
     console.log(`\nProposed devDependency: suzukuri@${packageJson.version}`);
   }
@@ -377,10 +527,16 @@ function promptConfirm(question: string): Promise<boolean> {
 }
 
 /**
- * Applies the accepted plan by writing every changed file to a temporary
- * path first and renaming only once all writes have succeeded, so a
- * mid-apply failure cannot leave a half-migrated command registry (e.g. a
- * devDependency added without the registry file, or vice versa).
+ * Applies the accepted plan. Every mutation is staged first — the registry
+ * to a temp file, package.json to an in-memory candidate — and the package
+ * manager lockfile is updated (which is the only step that can fail for
+ * reasons outside our control, e.g. a missing binary or network-dependent
+ * resolution) before any file is committed. Only once the lockfile mutation
+ * has succeeded are package.json and the registry renamed into place, and
+ * that rename order is chosen so a crash between them leaves package.json
+ * (with its devDependency and pruned scripts) already consistent with the
+ * lockfile, with only the registry file still to land — never the reverse,
+ * which would leave a registry with no declared dependency.
  */
 function applyInitPlan(cwd: string, plan: InitPlan): void {
   const configDirectory = path.join(cwd, path.dirname(DEFAULT_EXECUTION_CONFIG_PATH));
@@ -389,28 +545,89 @@ function applyInitPlan(cwd: string, plan: InitPlan): void {
   const configTemp = `${configPath}.${process.pid}.tmp`;
   fs.writeFileSync(configTemp, `${JSON.stringify(plan.commandsConfig, null, 2)}\n`);
 
-  if (!plan.addDevDependency) {
+  const packageJsonPath = path.join(cwd, "package.json");
+  const packageJsonContent = readPackageJson(packageJsonPath);
+  const nextPackageJson = computeNextPackageJson(packageJsonContent, plan);
+
+  if (nextPackageJson === undefined) {
     fs.renameSync(configTemp, configPath);
     return;
   }
 
-  const packageJsonPath = path.join(cwd, "package.json");
-  const packageJsonContent = readPackageJson(packageJsonPath);
-  // Recomputed from the just-read package.json rather than trusting a
+  const originalPackageJsonRaw = fs.readFileSync(packageJsonPath, "utf8");
+  const packageJsonSerialized = `${JSON.stringify(nextPackageJson, null, 2)}\n`;
+  fs.writeFileSync(packageJsonPath, packageJsonSerialized);
+
+  // Re-checked against the just-written package.json rather than trusting a
   // plan-time decision, which was made before the confirmation prompt and
-  // could be stale if package.json changed in that window.
-  if (packageJsonContent.devDependencies?.suzukuri !== undefined) {
-    fs.renameSync(configTemp, configPath);
-    return;
+  // could be stale if package.json changed in that window. Only the
+  // devDependency being newly added needs the lockfile regenerated; a
+  // scripts-only change doesn't affect resolved dependencies.
+  if (
+    packageJsonContent.devDependencies?.suzukuri === undefined &&
+    nextPackageJson.devDependencies?.suzukuri !== undefined
+  ) {
+    try {
+      updateLockfile(cwd, plan.packageManager);
+    } catch (error) {
+      fs.writeFileSync(packageJsonPath, originalPackageJsonRaw);
+      fs.rmSync(configTemp, { force: true });
+      throw error;
+    }
   }
-  const nextPackageJson: PackageJson = {
-    ...packageJsonContent,
-    devDependencies: { ...packageJsonContent.devDependencies, suzukuri: `^${packageJson.version}` },
-  };
-  const packageJsonTemp = `${packageJsonPath}.${process.pid}.tmp`;
-  fs.writeFileSync(packageJsonTemp, `${JSON.stringify(nextPackageJson, null, 2)}\n`);
+
   fs.renameSync(configTemp, configPath);
-  fs.renameSync(packageJsonTemp, packageJsonPath);
+}
+
+/**
+ * Builds the package.json this plan would produce, or undefined when
+ * package.json needs no changes at all (nothing to import into scripts and
+ * the devDependency is already present).
+ */
+function computeNextPackageJson(current: PackageJson, plan: InitPlan): PackageJson | undefined {
+  let next = current;
+  let scriptsChanged = false;
+  if (plan.scriptsToRemove.length > 0 || Object.keys(plan.lifecycleRewrites).length > 0) {
+    const nextScripts = { ...next.scripts };
+    for (const scriptName of plan.scriptsToRemove) {
+      if (nextScripts[scriptName] === undefined) continue;
+      delete nextScripts[scriptName];
+      scriptsChanged = true;
+    }
+    for (const [scriptName, rewritten] of Object.entries(plan.lifecycleRewrites)) {
+      if (nextScripts[scriptName] === rewritten) continue;
+      nextScripts[scriptName] = rewritten;
+      scriptsChanged = true;
+    }
+    if (scriptsChanged) next = { ...next, scripts: nextScripts };
+  }
+  if (plan.addDevDependency && current.devDependencies?.suzukuri === undefined) {
+    next = { ...next, devDependencies: { ...next.devDependencies, suzukuri: `^${packageJson.version}` } };
+  }
+  return next === current ? undefined : next;
+}
+
+/**
+ * Regenerates the package manager's lockfile from the just-written
+ * package.json without touching node_modules, so `devDependencies.suzukuri`
+ * is reflected in the lockfile and a subsequent frozen-lockfile / CI install
+ * does not fail or drift.
+ */
+function updateLockfile(cwd: string, packageManager: "pnpm" | "npm"): void {
+  const argv: [string, ...string[]] =
+    packageManager === "pnpm" ? ["pnpm", "install", "--lockfile-only"] : ["npm", "install", "--package-lock-only"];
+  const result = spawnSync(argv[0], argv.slice(1), { cwd, stdio: "pipe", encoding: "utf8" });
+  if (result.error !== undefined || result.status !== 0) {
+    throw new InitCommandError(
+      "INIT_LOCKFILE_UPDATE_FAILED",
+      `Failed to update the lockfile via "${argv.join(" ")}".`,
+      {
+        status: result.status,
+        stderr: result.stderr,
+        reason: result.error?.message,
+      },
+    );
+  }
 }
 
 function validateAppliedPlan(cwd: string): void {
