@@ -15,10 +15,6 @@ jobs:
   publish:
     uses: yohn-jp/.github/.github/workflows/npm-publish.yml@main
     with:
-      working-directory: .
-      node-version: "24"
-      smoke-test-node-versions: "24"
-      npm-cli-version: "11.5.1"
       certification-verification-script: scripts/verify-release-certification.mjs
     permissions:
       actions: read
