@@ -1,5 +1,18 @@
 # List native-build packages here if pnpm's default ignored-builds
 # safety net blocks them (ERR_PNPM_IGNORED_BUILDS). esbuild (a transitive
 # dependency of tsx) is a known-safe, widely used build tool.
+# minimum-release-age is disabled globally in .npmrc (this is our own
+# product; we accept fresh releases immediately), so per-version excludes
+# here are unnecessary — don't let pnpm re-add them piecemeal.
 allowBuilds:
   esbuild: true
+
+# Dependency pinning policy (2026-09-21): keep every dependency at latest
+# except where a concrete, checked incompatibility blocks it. Do not
+# re-derive this each update round; update the note below instead when
+# the blocking condition changes.
+#
+# - typescript: pinned to ^6.0.3 in package.json. typescript-eslint@8.70.0
+#   declares a peer range of ">=4.8.4 <6.1.0", so typescript@7.x is
+#   unsupported by our lint toolchain today. Re-check when typescript-eslint
+#   raises its peer ceiling past 7.x, then bump both together.
