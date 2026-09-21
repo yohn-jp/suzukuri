@@ -3,10 +3,13 @@ import { createBuiltinProjectionCore } from "./builtin.js";
 import { lookupExecutionCache, markResultReused } from "./execution-cache.js";
 import {
   ExecutionError,
+  isSteppedExecutionCommand,
   loadExecutionConfig,
   processResultExitCode,
   resolveExecutionCommand,
+  runBoundedCommandSteps,
   runBoundedProcess,
+  type BoundedProcessResult,
 } from "./execution.js";
 import { profileErrorToJson } from "./profiles.js";
 
@@ -30,17 +33,22 @@ export async function runTestCommand(parsed: TestCommandArguments): Promise<numb
     return processResultExitCode(lookup.cached);
   }
 
-  const processResult = await runBoundedProcess(command.argv);
+  const processResult = isSteppedExecutionCommand(command)
+    ? await runSteppedTest(command.steps)
+    : await runBoundedProcess(command.argv);
+  const stepView = isSteppedExecutionCommand(command) ? undefined : command.view;
+  const stepAdapter = isSteppedExecutionCommand(command) ? undefined : command.adapter;
+  const stepBudget = isSteppedExecutionCommand(command) ? undefined : command.budget;
   const source = projectionSource(processResult.stdout, processResult.stderr);
   const view =
-    command.view ??
+    stepView ??
     (processResult.exitCode === 0 && processResult.signal === null ? "test-result-summary" : "test-result-failures");
   try {
     const result = createBuiltinProjectionCore().project({
       source: { content: source, identity: "suzukuri test producer", mediaType: "text/plain" },
-      adapter: command.adapter ?? "vitest",
+      adapter: stepAdapter ?? "vitest",
       view,
-      budget: createBudget(command.budget ?? 8 * 1024),
+      budget: createBudget(stepBudget ?? 8 * 1024),
       renderer: "json",
     });
     const printed = renderedText(result.output);
@@ -71,6 +79,24 @@ export async function runTestCommand(parsed: TestCommandArguments): Promise<numb
       reason: errorCode(error),
     });
   }
+}
+
+/**
+ * Runs a stepped test command sequentially, stopping at the first
+ * failed/signaled step. Only that step's output is projected: later steps
+ * never ran, and earlier steps already passed.
+ */
+async function runSteppedTest(steps: Parameters<typeof runBoundedCommandSteps>[0]): Promise<BoundedProcessResult> {
+  const result = await runBoundedCommandSteps(steps);
+  const outcome = result.failedStep ?? result.steps[result.steps.length - 1];
+  return {
+    argv: outcome.argv,
+    exitCode: outcome.exitCode,
+    signal: outcome.signal,
+    stdout: outcome.stdout,
+    stderr: outcome.stderr,
+    truncated: outcome.truncated,
+  };
 }
 
 function projectionSource(stdout: string, stderr: string): string {

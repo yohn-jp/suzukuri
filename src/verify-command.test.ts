@@ -151,6 +151,82 @@ test("verify preserves a producer signal outcome", async () => {
   }
 });
 
+test("verify with ordered steps stops at the first failed step and reports its declared name as the stage", async () => {
+  const { directory, config } = fixture("suzukuri-verify-steps-failure-");
+  const okScript = path.join(directory, "ok.mjs");
+  const brokenScript = path.join(directory, "broken.mjs");
+  const neverRunsScript = path.join(directory, "never-runs.mjs");
+  const marker = path.join(directory, "never-runs.marker");
+  const lines: string[] = [];
+  const originalLog = console.log;
+  fs.writeFileSync(okScript, "process.exitCode = 0;\n");
+  fs.writeFileSync(brokenScript, "console.error('boom'); process.exitCode = 1;\n");
+  fs.writeFileSync(neverRunsScript, `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(marker)}, "ran");\n`);
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: {
+        verify: {
+          steps: [
+            { name: "lint", argv: [process.execPath, okScript] },
+            { name: "typecheck", argv: [process.execPath, brokenScript] },
+            { name: "test", argv: [process.execPath, neverRunsScript] },
+          ],
+        },
+      },
+    }),
+  );
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(exitCode, 1);
+    const result = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(result.status, "failed");
+    assert.equal(result.stage, "typecheck");
+    assert.equal(result.completeness, "complete");
+    assert.equal(fs.existsSync(marker), false, "a step after the failing one must never run");
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("verify with ordered steps reports success once every step passes", async () => {
+  const { directory, config } = fixture("suzukuri-verify-steps-success-");
+  const okScript = path.join(directory, "ok.mjs");
+  const lines: string[] = [];
+  const originalLog = console.log;
+  fs.writeFileSync(okScript, "process.exitCode = 0;\n");
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: {
+        verify: {
+          steps: [
+            { name: "lint", argv: [process.execPath, okScript] },
+            { name: "test", argv: [process.execPath, okScript] },
+          ],
+        },
+      },
+    }),
+  );
+  console.log = (line: string) => lines.push(line);
+  try {
+    const exitCode = await runVerifyCommand({ positionals: [], options: { config } });
+    assert.equal(exitCode, 0);
+    assert.deepEqual(JSON.parse(lines[0] ?? "{}"), {
+      completeness: "complete",
+      status: "passed",
+      version: VERIFY_RESULT_SCHEMA_VERSION,
+    });
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a second unchanged verify invocation returns the prior bounded result without spawning the producer again", async () => {
   const { repository, directory, producer, config, counter } = gitFixture("suzukuri-verify-cache-hit-");
   const originalCwd = process.cwd();

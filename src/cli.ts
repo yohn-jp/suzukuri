@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import { type ComponentReference, createBudget, stableJsonStringify } from "./core.js";
 import { runDiffCommand } from "./diff-command.js";
+import { runInitCommand } from "./init-command.js";
 import { createProfileCore } from "./profile-builtins.js";
 import { runTestCommand } from "./test-command.js";
 import { runVerifyCommand } from "./verify-command.js";
@@ -102,6 +103,9 @@ export async function runCli(argv: string[]): Promise<number> {
     }
     if (command === "diff") {
       return runDiffCommand({ positionals: parsed.positionals.slice(1), options: parsed.options });
+    }
+    if (command === "init") {
+      return await runInitCommand({ positionals: parsed.positionals.slice(1), options: parsed.options });
     }
     if (command === "inspect") {
       return runInspectionCommand(parsed, parsed.positionals[1]);

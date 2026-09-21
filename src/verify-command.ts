@@ -2,9 +2,11 @@ import { stableJsonStringify } from "./core.js";
 import { lookupExecutionCache, markResultReused } from "./execution-cache.js";
 import {
   DEFAULT_PROCESS_OUTPUT_LIMIT,
+  isSteppedExecutionCommand,
   loadExecutionConfig,
   processResultExitCode,
   resolveExecutionCommand,
+  runBoundedCommandSteps,
   runBoundedProcess,
 } from "./execution.js";
 import type { VerifyResult } from "./verify-result.js";
@@ -61,9 +63,13 @@ export async function runVerifyCommand(parsed: VerifyCommandArguments): Promise<
     return processResultExitCode(lookup.cached);
   }
 
-  const maxOutputBytes = command.budget ?? DEFAULT_PROCESS_OUTPUT_LIMIT;
-  const processResult = await runBoundedProcess(command.argv, { maxOutputBytes });
-  const result = createVerifyResult(processResult, command.budget ?? DEFAULT_VERIFY_DIAGNOSTIC_BYTES);
+  const processResult = isSteppedExecutionCommand(command)
+    ? await runSteppedVerify(command.steps)
+    : await runBoundedProcess(command.argv, { maxOutputBytes: command.budget ?? DEFAULT_PROCESS_OUTPUT_LIMIT });
+  const diagnosticLimit = isSteppedExecutionCommand(command)
+    ? DEFAULT_VERIFY_DIAGNOSTIC_BYTES
+    : (command.budget ?? DEFAULT_VERIFY_DIAGNOSTIC_BYTES);
+  const result = createVerifyResult(processResult, diagnosticLimit);
   if (lookup !== undefined) {
     await lookup.commit({
       exitCode: processResult.exitCode,
@@ -85,6 +91,31 @@ interface VerifyProcessResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly truncated: boolean;
+  /** The structurally identified failing step name, when execution ran named steps. */
+  readonly stage?: string;
+}
+
+/**
+ * Runs a stepped verify command sequentially, stopping at the first
+ * failed/signaled step. The failing step's declared name is carried as
+ * `stage` directly from execution structure, so verify never has to infer it
+ * from concatenated producer output.
+ */
+async function runSteppedVerify(steps: Parameters<typeof runBoundedCommandSteps>[0]): Promise<VerifyProcessResult> {
+  const result = await runBoundedCommandSteps(steps);
+  const failed = result.failedStep;
+  if (failed === undefined) {
+    const last = result.steps[result.steps.length - 1];
+    return { exitCode: last.exitCode, signal: last.signal, stdout: "", stderr: "", truncated: false };
+  }
+  return {
+    exitCode: failed.exitCode,
+    signal: failed.signal,
+    stdout: failed.stdout,
+    stderr: failed.stderr,
+    truncated: failed.truncated,
+    stage: failed.name,
+  };
 }
 
 function createVerifyResult(processResult: VerifyProcessResult, diagnosticLimit: number): VerifyResult {
@@ -97,7 +128,7 @@ function createVerifyResult(processResult: VerifyProcessResult, diagnosticLimit:
   }
 
   const observation = [processResult.stdout, processResult.stderr].filter((value) => value.length > 0).join("\n");
-  const stage = identifyStage(observation);
+  const stage = processResult.stage ?? identifyStage(observation);
   const diagnostic = boundedDiagnostic(observation || failureOutcome(processResult), diagnosticLimit);
   return {
     version: VERIFY_RESULT_SCHEMA_VERSION,

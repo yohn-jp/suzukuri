@@ -9,11 +9,29 @@ export const DEFAULT_PROCESS_OUTPUT_LIMIT = 64 * 1024;
 
 export type ExecutionCommandName = "test" | "verify" | "diff";
 
-export interface ExecutionCommand {
+export interface ExecutionCommandStep {
+  readonly name: string;
   readonly argv: readonly [string, ...string[]];
   readonly adapter?: string;
   readonly view?: string;
   readonly budget?: number;
+}
+
+export interface SingleExecutionCommand {
+  readonly argv: readonly [string, ...string[]];
+  readonly adapter?: string;
+  readonly view?: string;
+  readonly budget?: number;
+}
+
+export interface SteppedExecutionCommand {
+  readonly steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]];
+}
+
+export type ExecutionCommand = SingleExecutionCommand | SteppedExecutionCommand;
+
+export function isSteppedExecutionCommand(command: ExecutionCommand): command is SteppedExecutionCommand {
+  return "steps" in command;
 }
 
 export interface ExecutionConfig {
@@ -79,12 +97,50 @@ function configIssue(pathName: string, message: string): ExecutionError {
 
 function normalizeCommand(value: unknown, commandName: string): ExecutionCommand {
   const issuePath = `$.commands.${commandName}`;
+  if (isRecord(value) && value.steps !== undefined) {
+    for (const key of unknownKeys(value, ["steps"])) {
+      throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
+    }
+    if (!Array.isArray(value.steps) || value.steps.length === 0) {
+      throw configIssue(`${issuePath}.steps`, "Command steps must be a non-empty array.");
+    }
+    const seenNames = new Set<string>();
+    const steps = value.steps.map((step, index) => {
+      const stepPath = `${issuePath}.steps[${index}]`;
+      if (!isRecord(step)) throw configIssue(stepPath, "Each step must be an object.");
+      if (typeof step.name !== "string" || step.name.trim() === "") {
+        throw configIssue(`${stepPath}.name`, "Step name must be a non-empty string.");
+      }
+      if (seenNames.has(step.name)) {
+        throw configIssue(`${stepPath}.name`, `Step name "${step.name}" must be unique within the command.`);
+      }
+      seenNames.add(step.name);
+      const normalized = normalizeSingleCommand(step, stepPath, [
+        "name",
+        "argv",
+        "command",
+        "adapter",
+        "view",
+        "budget",
+      ]);
+      return { name: step.name, ...normalized };
+    });
+    return { steps: steps as [ExecutionCommandStep, ...ExecutionCommandStep[]] };
+  }
+  return normalizeSingleCommand(value, issuePath, ["argv", "command", "adapter", "view", "budget"]);
+}
+
+function normalizeSingleCommand(
+  value: unknown,
+  issuePath: string,
+  allowedKeys: readonly string[],
+): SingleExecutionCommand {
   let argvValue: unknown = value;
   let adapter: string | undefined;
   let view: string | undefined;
   let budget: number | undefined;
   if (isRecord(value)) {
-    for (const key of unknownKeys(value, ["argv", "command", "adapter", "view", "budget"])) {
+    for (const key of unknownKeys(value, allowedKeys)) {
       throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
     }
     argvValue = value.argv ?? value.command;
@@ -131,7 +187,11 @@ export function parseExecutionConfig(input: unknown): ExecutionConfig {
   const commands: Partial<Record<ExecutionCommandName, ExecutionCommand>> = {};
   for (const [name, value] of Object.entries(rawCommands)) {
     if (!isCommandName(name)) throw configIssue(`$.commands.${name}`, `Unsupported execution command "${name}".`);
-    commands[name] = normalizeCommand(value, name);
+    const command = normalizeCommand(value, name);
+    if (name === "diff" && isSteppedExecutionCommand(command)) {
+      throw configIssue(`$.commands.${name}`, `Command "diff" does not support ordered steps.`);
+    }
+    commands[name] = command;
   }
   return { schemaVersion: EXECUTION_SCHEMA_VERSION, commands };
 }
@@ -274,6 +334,40 @@ export function runBoundedProcess(
       });
     });
   });
+}
+
+export interface StepProcessResult extends BoundedProcessResult {
+  readonly name: string;
+}
+
+export interface SteppedProcessResult {
+  readonly steps: readonly StepProcessResult[];
+  /** The step that stopped execution, or undefined when every step passed. */
+  readonly failedStep: StepProcessResult | undefined;
+}
+
+/**
+ * Runs each step's argv in declared order, stopping at the first
+ * failed/signaled step so later steps never run once an earlier one has
+ * already failed, matching `&&` aggregate semantics.
+ */
+export async function runBoundedCommandSteps(
+  steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]],
+  options: BoundedProcessOptions = {},
+): Promise<SteppedProcessResult> {
+  const results: StepProcessResult[] = [];
+  for (const step of steps) {
+    const result = await runBoundedProcess(step.argv, {
+      ...options,
+      maxOutputBytes: step.budget ?? options.maxOutputBytes,
+    });
+    const stepResult: StepProcessResult = { ...result, name: step.name };
+    results.push(stepResult);
+    if (result.exitCode !== 0 || result.signal !== null) {
+      return { steps: results, failedStep: stepResult };
+    }
+  }
+  return { steps: results, failedStep: undefined };
 }
 
 export function processResultExitCode(result: Pick<BoundedProcessResult, "exitCode" | "signal">): number {

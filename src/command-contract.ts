@@ -12,6 +12,7 @@ export type CommandDomain =
   | "project"
   | "diff"
   | "verify"
+  | "init"
   | "adapters"
   | "views"
   | "contracts"
@@ -35,6 +36,7 @@ export const DOMAIN_SUMMARIES: ReadonlyArray<{ readonly domain: CommandDomain; r
   { domain: "project", description: "Explicit low-level adapter/view/renderer projection" },
   { domain: "diff", description: "Bounded git diff/status projection" },
   { domain: "verify", description: "Repository-mapped semantic verify execution" },
+  { domain: "init", description: "Guided repository adoption of suzukuri as the public test/verify interface" },
   { domain: "adapters", description: "Inspect the registered adapter surface" },
   { domain: "views", description: "Inspect the registered view surface" },
   { domain: "contracts", description: "Inspect the registered semantic-contract surface" },
@@ -109,6 +111,14 @@ export const SUZUKURI_COMMANDS: readonly CommandDefinition[] = [
     usage: "verify [--config path] [--format json|text]",
     summary: "Run the configured repository verify producer and project bounded results.",
     example: "suzukuri verify --config .suzukuri/commands.json",
+  },
+  {
+    id: "init",
+    domain: "init",
+    path: ["init"],
+    usage: "init [--yes] [--dry-run]",
+    summary: "Inspect existing test/verify scripts and propose a confirmed migration to suzukuri test/verify.",
+    example: "suzukuri init",
   },
   {
     id: "adapters",
