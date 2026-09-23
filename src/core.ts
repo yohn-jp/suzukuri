@@ -643,7 +643,7 @@ export class ProjectionCore {
       semanticContract: contractIdentity,
       view: viewIdentity,
       renderer: rendererIdentity,
-      ...(sourceProvenance === undefined ? {} : { source: sourceProvenance }),
+      source: sourceProvenance,
     };
     const components: ProjectionComponents = {
       adapter: adapterIdentity,
@@ -670,7 +670,7 @@ export class ProjectionCore {
       semanticContract: contractIdentity,
       view: viewIdentity,
       renderer: rendererIdentity,
-      ...(sourceProvenance === undefined ? {} : { source: sourceProvenance }),
+      source: sourceProvenance,
       components,
       provenance,
       projectionDigest,
@@ -1317,23 +1317,36 @@ function validateRequest(request: ProjectionRequest): void {
 }
 
 function normalizeSource(source: SourceInput): ProjectionSource {
+  let normalized: ProjectionSource;
   if (typeof source === "string") {
-    return Object.freeze({ content: source });
-  }
-  if (source instanceof Uint8Array) {
-    return Object.freeze({ content: new Uint8Array(source) });
-  }
-  if (source === null || typeof source !== "object") {
+    normalized = { content: source };
+  } else if (source instanceof Uint8Array) {
+    normalized = { content: new Uint8Array(source) };
+  } else if (source === null || typeof source !== "object") {
     throw new SuzukuriError("SOURCE_INVALID", undefined, { field: "source" });
+  } else {
+    const content = source.content;
+    if (typeof content !== "string" && !(content instanceof Uint8Array)) {
+      throw new SuzukuriError("SOURCE_INVALID", undefined, { field: "source.content" });
+    }
+    normalized = {
+      ...source,
+      content: typeof content === "string" ? content : new Uint8Array(content),
+    };
   }
-  const content = source.content;
-  if (typeof content !== "string" && !(content instanceof Uint8Array)) {
-    throw new SuzukuriError("SOURCE_INVALID", undefined, { field: "source.content" });
+
+  const contentBytes =
+    typeof normalized.content === "string" ? Buffer.from(normalized.content, "utf8") : normalized.content;
+  const hash = createHash("sha256").update(contentBytes).digest("hex");
+  if (normalized.hash !== undefined && normalized.hash !== hash) {
+    throw new SuzukuriError("SOURCE_INVALID", undefined, {
+      field: "source.hash",
+      expected: hash,
+      actual: normalized.hash,
+    });
   }
-  return Object.freeze({
-    ...source,
-    content: typeof content === "string" ? content : new Uint8Array(content),
-  });
+
+  return Object.freeze({ ...normalized, hash });
 }
 
 function normalizeBudget(input: BudgetInput): Budget {
@@ -1628,13 +1641,10 @@ function uniqueReductions(values: readonly LossReduction[]): readonly LossReduct
   return result;
 }
 
-function sourceMetadata(source: ProjectionSource): SourceProvenance | undefined {
-  if (source.identity === undefined && source.hash === undefined && source.mediaType === undefined) {
-    return undefined;
-  }
+function sourceMetadata(source: ProjectionSource): SourceProvenance {
   return {
     ...(source.identity === undefined ? {} : { identity: source.identity }),
-    ...(source.hash === undefined ? {} : { hash: source.hash }),
+    hash: source.hash,
     ...(source.mediaType === undefined ? {} : { mediaType: source.mediaType }),
   };
 }
