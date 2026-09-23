@@ -117,3 +117,19 @@ The support matrix is intentionally finite: unsupported producers or languages f
 `pnpm run conformance` runs the executable v0 fixture suite and reports byte reduction, projection latency, automatic fallback rate, required/preserved meaning, and comparison with naive byte truncation. `pnpm run verify` additionally builds the package, checks packed contents, installs the tarball into an isolated consumer, runs all five repository profiles through the installed CLI, and verifies an external TypeScript caller can consume stable provenance without caller state crossing the boundary.
 
 Execution commands in `.suzukuri/commands.json` may declare `inputs` as a non-empty array of repository-relative file or directory paths, for example `"inputs": ["src", "package.json"]`. Paths are literal and include files beneath a named directory. A stepped command may declare command-level inputs, step inputs, or both; the existing command-level cache uses their union. If a step has no inputs and the command has none, the cache retains its repository-wide fingerprint. Only tracked and non-ignored untracked files contribute to a scoped fingerprint. Omit `inputs` to retain repository-wide behavior.
+
+## Reusable verification evidence
+
+Reusable `test-result` and `verification-result` JSON results include canonical evidence when Suzukuri can prove a stable input fingerprint. Single-producer results expose `evidence`; stepped results expose evidence on each `steps` entry. The evidence records fixed-size SHA-256 identities for the producer definition, input fingerprint, bounded semantic result, and evidence itself, plus execution state (`executed` or `reused`) and the explicitly declared tier when present. `producerIdentity` hashes the registered command name and exact normalized producer definition; step names remain on their corresponding `steps` entries.
+
+Evidence hashes are lowercase SHA-256 hex digests over Suzukuri's canonical stable JSON representation. The identities are computed as follows:
+
+```text
+producerIdentity = SHA-256(stableJsonStringify({ commandName, commandDefinition }))
+resultIdentity = SHA-256(stableJsonStringify({ exitCode, signal, result }))
+identity = SHA-256(stableJsonStringify({ version, producerIdentity, inputFingerprint, resultIdentity }))
+```
+
+For a stepped producer, `commandDefinition` is that step's normalized definition and effective input scope. `result` is its bounded projected semantic result. Reuse preserves the evidence identity and original PASS/FAIL outcome while changing only `execution` to `reused`; the legacy top-level `reused` marker remains available for single-result cache hits.
+
+A consumer can validate evidence by comparing the producer definition identity and input fingerprint with the current registered producer and its declared input scope, then checking the result identity and evidence identity. Tier is descriptive metadata and is not inferred. Timestamps, branch names, worktree paths, commit identities, and raw producer logs are not evidence validity inputs. If a complete stable fingerprint cannot be obtained, Suzukuri runs the producer without emitting reusable evidence.

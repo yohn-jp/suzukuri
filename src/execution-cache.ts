@@ -10,8 +10,13 @@ import {
   type SteppedExecutionCommand,
 } from "./execution.js";
 import { computeRepositoryFingerprint, RepositoryFingerprintError } from "./repository-fingerprint.js";
+import {
+  isVerificationEvidence,
+  VERIFICATION_EVIDENCE_SCHEMA_VERSION,
+  type VerificationEvidence,
+} from "./verify-result.js";
 
-export const EXECUTION_CACHE_SCHEMA_VERSION = 1 as const;
+export const EXECUTION_CACHE_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_EXECUTION_CACHE_DIRECTORY = ".suzukuri/cache/execution-results";
 /** Bounds the cache to a fixed maximum number of stored entries. */
 export const DEFAULT_EXECUTION_CACHE_MAX_ENTRIES = 200;
@@ -20,6 +25,7 @@ export interface CachedExecutionOutcome {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly printed: unknown;
+  readonly evidence?: VerificationEvidence;
 }
 
 export interface ExecutionCacheEntry {
@@ -167,9 +173,11 @@ export interface ExecutionCacheLookup {
    * of that content would incorrectly reuse it. When the recheck itself
    * fails or the content changed, the outcome is silently not cached —
    * this only affects caching, never the result already returned to the
-   * caller for the current invocation.
+   * caller for the current invocation. For verification projections, the
+   * method returns evidence only when the post-run fingerprint still matches
+   * the lookup fingerprint and the bounded result is committed.
    */
-  commit(outcome: CachedExecutionOutcome): Promise<void>;
+  commit(outcome: CachedExecutionOutcome): Promise<VerificationEvidence | undefined>;
 }
 
 /**
@@ -209,7 +217,13 @@ export async function lookupExecutionStepCache(
   const scopedInputs = [...new Set([...(command.inputs ?? []), ...(step.inputs ?? [])])];
   const inputs = scopedInputs.length === 0 ? undefined : scopedInputs;
   const identity: SteppedExecutionCommand = {
-    steps: [{ ...step, ...(inputs === undefined ? {} : { inputs }) }],
+    steps: [
+      {
+        ...step,
+        ...(inputs === undefined ? {} : { inputs }),
+        ...(step.tier === undefined && command.tier !== undefined ? { tier: command.tier } : {}),
+      },
+    ],
     projection: command.projection,
     reuse: command.reuse,
   };
@@ -231,21 +245,81 @@ async function lookupCacheForIdentity(
   }
   const cache = new ExecutionResultCache(options);
   const cacheKey = cache.key(commandName, command, fingerprint);
+  const stored = cache.read(cacheKey);
+  const cached =
+    stored === undefined || command.projection === "generic"
+      ? stored
+      : isCurrentVerificationEvidence(stored, commandName, command, fingerprint)
+        ? stored
+        : undefined;
   return {
     cacheKey,
     fingerprint,
-    cached: cache.read(cacheKey),
+    cached,
     commit: async (outcome) => {
       let postFingerprint: string;
       try {
         postFingerprint = await computeRepositoryFingerprint(options.cwd, inputs);
       } catch {
-        return;
+        return undefined;
       }
-      if (postFingerprint !== fingerprint) return;
-      cache.write(cacheKey, commandName, fingerprint, outcome);
+      if (postFingerprint !== fingerprint) return undefined;
+      const evidence =
+        command.projection === "generic"
+          ? undefined
+          : createVerificationEvidence(commandName, command, fingerprint, outcome);
+      cache.write(cacheKey, commandName, fingerprint, {
+        ...outcome,
+        ...(evidence === undefined ? {} : { evidence }),
+      });
+      return evidence;
     },
   };
+}
+
+function createVerificationEvidence(
+  commandName: ExecutionCommandName,
+  command: ExecutionCommand,
+  inputFingerprint: string,
+  outcome: CachedExecutionOutcome,
+): VerificationEvidence {
+  const step = isSteppedExecutionCommand(command) && command.steps.length === 1 ? command.steps[0] : undefined;
+  const tier = step?.tier ?? command.tier;
+  const producerDefinitionIdentity = hashIdentity({ commandName, command });
+  const resultIdentity = hashIdentity({
+    exitCode: outcome.exitCode,
+    signal: outcome.signal,
+    result: outcome.printed,
+  });
+  return {
+    version: VERIFICATION_EVIDENCE_SCHEMA_VERSION,
+    identity: hashIdentity({
+      version: VERIFICATION_EVIDENCE_SCHEMA_VERSION,
+      producerIdentity: producerDefinitionIdentity,
+      inputFingerprint,
+      resultIdentity,
+    }),
+    producerIdentity: producerDefinitionIdentity,
+    inputFingerprint,
+    resultIdentity,
+    execution: "executed",
+    ...(tier === undefined ? {} : { tier }),
+  };
+}
+
+function isCurrentVerificationEvidence(
+  outcome: CachedExecutionOutcome,
+  commandName: ExecutionCommandName,
+  command: ExecutionCommand,
+  fingerprint: string,
+): boolean {
+  if (!isVerificationEvidence(outcome.evidence) || outcome.evidence.execution !== "executed") return false;
+  const expected = createVerificationEvidence(commandName, command, fingerprint, outcome);
+  return stableJsonStringify(outcome.evidence) === stableJsonStringify(expected);
+}
+
+function hashIdentity(value: unknown): string {
+  return createHash("sha256").update(stableJsonStringify(value)).digest("hex");
 }
 
 /**

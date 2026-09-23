@@ -6,6 +6,7 @@ import {
   isSourceRange,
   type SourceRange,
 } from "./semantic-location.js";
+import { isVerificationEvidence, type VerificationEvidence } from "./verify-result.js";
 
 export const TEST_RESULT_SEMANTIC_TYPE = "test-result";
 export const TEST_RESULT_SCHEMA_VERSION = "1.0.0";
@@ -40,7 +41,12 @@ export interface TestResult {
   readonly counts: TestCounts;
   readonly failures: readonly TestFailure[];
   readonly durationMs?: number;
-  readonly steps?: readonly { readonly name: string; readonly execution: "executed" | "reused" }[];
+  readonly evidence?: VerificationEvidence;
+  readonly steps?: readonly {
+    readonly name: string;
+    readonly execution: "executed" | "reused";
+    readonly evidence?: VerificationEvidence;
+  }[];
 }
 
 export const testResultContract: SemanticContract<TestResult> = Object.freeze({
@@ -80,6 +86,13 @@ export function validateTestResult(value: unknown): ValidationResult {
   if (value.durationMs !== undefined && !isDuration(value.durationMs)) {
     issues.push({ code: "duration", message: "durationMs must be a non-negative finite number", path: "durationMs" });
   }
+  if (value.evidence !== undefined && !isVerificationEvidence(value.evidence)) {
+    issues.push({
+      code: "evidence",
+      message: "evidence must contain canonical verification provenance",
+      path: "evidence",
+    });
+  }
   if (value.steps !== undefined && !isValidStepExecutions(value.steps)) {
     issues.push({ code: "steps", message: "steps must contain named executed or reused results", path: "steps" });
   }
@@ -107,7 +120,15 @@ export function normalizeTestResult(value: unknown): TestResult {
     counts: { ...input.counts },
     failures,
     ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
-    ...(input.steps === undefined ? {} : { steps: input.steps.map((step) => ({ ...step })) }),
+    ...(input.evidence === undefined ? {} : { evidence: { ...input.evidence } }),
+    ...(input.steps === undefined
+      ? {}
+      : {
+          steps: input.steps.map((step) => ({
+            ...step,
+            ...(step.evidence === undefined ? {} : { evidence: { ...step.evidence } }),
+          })),
+        }),
   };
 }
 
@@ -162,7 +183,8 @@ function isValidStepExecutions(value: unknown): value is NonNullable<TestResult[
         isRecord(step) &&
         typeof step.name === "string" &&
         step.name.length > 0 &&
-        (step.execution === "executed" || step.execution === "reused"),
+        (step.execution === "executed" || step.execution === "reused") &&
+        (step.evidence === undefined || isVerificationEvidence(step.evidence)),
     )
   );
 }

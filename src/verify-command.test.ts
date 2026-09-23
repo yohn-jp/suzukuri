@@ -72,11 +72,14 @@ test("verify returns a minimal semantic success result for an explicit aggregate
   try {
     const exitCode = await runCli(["verify", "--config", config]);
     assert.equal(exitCode, 0);
-    assert.deepEqual(JSON.parse(lines[0] ?? "{}"), {
+    const result = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.deepEqual(Object.fromEntries(Object.entries(result).filter(([key]) => key !== "evidence")), {
       completeness: "complete",
       status: "passed",
       version: VERIFY_RESULT_SCHEMA_VERSION,
     });
+    assert.equal(isVerifyResult(result), true);
+    assert.equal((result.evidence as Record<string, unknown>).execution, "executed");
   } finally {
     console.log = originalLog;
     fs.rmSync(directory, { recursive: true, force: true });
@@ -185,10 +188,15 @@ test("verify with ordered steps stops at the first failed step and reports its d
     assert.equal(result.status, "failed");
     assert.equal(result.stage, "typecheck");
     assert.equal(result.completeness, "complete");
-    assert.deepEqual(result.steps, [
-      { name: "lint", execution: "executed" },
-      { name: "typecheck", execution: "executed" },
-    ]);
+    const steps = result.steps as Record<string, unknown>[];
+    assert.deepEqual(
+      steps.map(({ name, execution }) => ({ name, execution })),
+      [
+        { name: "lint", execution: "executed" },
+        { name: "typecheck", execution: "executed" },
+      ],
+    );
+    assert.ok(steps.every((step) => (step.evidence as Record<string, unknown>)?.execution === "executed"));
     assert.equal(fs.existsSync(marker), false, "a step after the failing one must never run");
   } finally {
     console.log = originalLog;
@@ -220,15 +228,19 @@ test("verify with ordered steps reports success once every step passes", async (
   try {
     const exitCode = await runVerifyCommand({ positionals: [], options: { config } });
     assert.equal(exitCode, 0);
-    assert.deepEqual(JSON.parse(lines[0] ?? "{}"), {
-      completeness: "complete",
-      status: "passed",
-      version: VERIFY_RESULT_SCHEMA_VERSION,
-      steps: [
+    const result = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+    assert.equal(result.completeness, "complete");
+    assert.equal(result.status, "passed");
+    assert.equal(result.version, VERIFY_RESULT_SCHEMA_VERSION);
+    const steps = result.steps as Record<string, unknown>[];
+    assert.deepEqual(
+      steps.map(({ name, execution }) => ({ name, execution })),
+      [
         { name: "lint", execution: "executed" },
         { name: "test", execution: "executed" },
       ],
-    });
+    );
+    assert.ok(steps.every((step) => (step.evidence as Record<string, unknown>)?.execution === "executed"));
   } finally {
     console.log = originalLog;
     fs.rmSync(directory, { recursive: true, force: true });

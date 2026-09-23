@@ -215,6 +215,61 @@ test('a generic command with explicit reuse "fingerprint" is cached like test/ve
   }
 });
 
+test("reusable verify results expose stable evidence for executed and reused PASS and FAIL outcomes", async () => {
+  const { repository, directory, config, counter } = gitFixture("suzukuri-run-verification-evidence-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  const lines: string[] = [];
+  const producer = path.join(directory, "verify.mjs");
+  fs.writeFileSync(
+    producer,
+    `import fs from "node:fs";\n` +
+      `fs.appendFileSync(${JSON.stringify(counter)}, "x");\n` +
+      `if (fs.readFileSync(${JSON.stringify(path.join(repository, "source.txt"))}, "utf8") === "fail") {\n` +
+      `  console.error("> pkg@1 lint /repo");\n` +
+      `  process.exitCode = 1;\n` +
+      `}\n`,
+  );
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: { verify: { argv: [process.execPath, producer], tier: "authoritative" } },
+    }),
+  );
+  console.log = (line: string) => lines.push(line);
+  try {
+    process.chdir(repository);
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 0);
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 0);
+    fs.writeFileSync(path.join(repository, "source.txt"), "fail");
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 1);
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 1);
+
+    const results = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    const evidence = results.map((result) => result.evidence as Record<string, unknown>);
+    assert.equal(evidence[0].execution, "executed");
+    assert.equal(evidence[1].execution, "reused");
+    assert.equal(evidence[2].execution, "executed");
+    assert.equal(evidence[3].execution, "reused");
+    assert.equal(evidence[0].identity, evidence[1].identity);
+    assert.equal(evidence[2].identity, evidence[3].identity);
+    assert.notEqual(evidence[0].identity, evidence[2].identity);
+    assert.equal(evidence[0].tier, "authoritative");
+    assert.equal(evidence[2].tier, "authoritative");
+    assert.match(String(evidence[0].producerIdentity), /^[a-f0-9]{64}$/);
+    assert.equal(results[1].reused, true);
+    assert.equal(results[2].status, "failed");
+    assert.equal(results[3].status, "failed");
+    assert.equal(results[3].reused, true);
+    assert.equal(fs.readFileSync(counter, "utf8"), "xx");
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("stepped verification reuses independent scoped results and invalidates only a changed step", async () => {
   const { repository, directory, config } = gitFixture("suzukuri-run-step-reuse-");
   const originalCwd = process.cwd();
@@ -254,8 +309,9 @@ test("stepped verification reuses independent scoped results and invalidates onl
             verify: {
               projection: "verification-result",
               reuse: "fingerprint",
+              tier: "authoritative",
               steps: [
-                { name: "first", argv: [process.execPath, producer], inputs: ["one.txt"] },
+                { name: "first", argv: [process.execPath, producer], inputs: ["one.txt"], tier: "focused" },
                 { name: "second", argv: [process.execPath, secondProducer], inputs: ["two.txt"] },
               ],
             },
@@ -271,22 +327,39 @@ test("stepped verification reuses independent scoped results and invalidates onl
     writeConfig(changedProducer);
     await runRunCommand({ positionals: ["verify"], options: { config } });
 
-    assert.deepEqual(JSON.parse(lines[0] ?? "{}").steps, [
-      { name: "first", execution: "executed" },
-      { name: "second", execution: "executed" },
-    ]);
-    assert.deepEqual(JSON.parse(lines[1] ?? "{}").steps, [
-      { name: "first", execution: "reused" },
-      { name: "second", execution: "reused" },
-    ]);
-    assert.deepEqual(JSON.parse(lines[2] ?? "{}").steps, [
-      { name: "first", execution: "executed" },
-      { name: "second", execution: "reused" },
-    ]);
-    assert.deepEqual(JSON.parse(lines[3] ?? "{}").steps, [
-      { name: "first", execution: "executed" },
-      { name: "second", execution: "reused" },
-    ]);
+    const results = lines.map((line) => JSON.parse(line) as { steps: Record<string, unknown>[] });
+    assert.deepEqual(
+      results.map(({ steps }) => steps.map(({ name, execution }) => ({ name, execution }))),
+      [
+        [
+          { name: "first", execution: "executed" },
+          { name: "second", execution: "executed" },
+        ],
+        [
+          { name: "first", execution: "reused" },
+          { name: "second", execution: "reused" },
+        ],
+        [
+          { name: "first", execution: "executed" },
+          { name: "second", execution: "reused" },
+        ],
+        [
+          { name: "first", execution: "executed" },
+          { name: "second", execution: "reused" },
+        ],
+      ],
+    );
+    const stepEvidence = results.map(({ steps }) => steps.map((step) => step.evidence as Record<string, unknown>));
+    assert.equal(stepEvidence[0][0].execution, "executed");
+    assert.equal(stepEvidence[1][0].execution, "reused");
+    assert.equal(stepEvidence[0][0].tier, "focused");
+    assert.equal(stepEvidence[0][1].tier, "authoritative");
+    assert.equal(stepEvidence[0][0].identity, stepEvidence[1][0].identity);
+    assert.equal(stepEvidence[0][1].identity, stepEvidence[1][1].identity);
+    assert.notEqual(stepEvidence[0][0].identity, stepEvidence[2][0].identity);
+    assert.equal(stepEvidence[1][1].identity, stepEvidence[2][1].identity);
+    assert.notEqual(stepEvidence[2][0].identity, stepEvidence[3][0].identity);
+    assert.equal(stepEvidence[2][1].identity, stepEvidence[3][1].identity);
     assert.equal(fs.readFileSync(firstCounter, "utf8"), "xx");
     assert.equal(fs.readFileSync(changedCounter, "utf8"), "x");
     assert.equal(fs.readFileSync(secondCounter, "utf8"), "x");
@@ -348,14 +421,28 @@ test("a cached failing step is reused and still short-circuits later steps", asy
     assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 1);
     assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 1);
 
-    assert.deepEqual(JSON.parse(lines[1] ?? "{}").steps, [
-      { name: "first", execution: "reused" },
-      { name: "failed", execution: "executed" },
-    ]);
-    assert.deepEqual(JSON.parse(lines[2] ?? "{}").steps, [
-      { name: "first", execution: "reused" },
-      { name: "failed", execution: "reused" },
-    ]);
+    const second = JSON.parse(lines[1] ?? "{}") as { steps: Record<string, unknown>[] };
+    const third = JSON.parse(lines[2] ?? "{}") as { steps: Record<string, unknown>[] };
+    assert.deepEqual(
+      second.steps.map(({ name, execution }) => ({ name, execution })),
+      [
+        { name: "first", execution: "reused" },
+        { name: "failed", execution: "executed" },
+      ],
+    );
+    assert.deepEqual(
+      third.steps.map(({ name, execution }) => ({ name, execution })),
+      [
+        { name: "first", execution: "reused" },
+        { name: "failed", execution: "reused" },
+      ],
+    );
+    assert.equal(second.steps[0].evidence && (second.steps[0].evidence as Record<string, unknown>).execution, "reused");
+    assert.equal(third.steps[1].evidence && (third.steps[1].evidence as Record<string, unknown>).execution, "reused");
+    assert.equal(
+      (second.steps[1].evidence as Record<string, unknown>).identity,
+      (third.steps[1].evidence as Record<string, unknown>).identity,
+    );
     assert.equal(fs.readFileSync(firstCounter, "utf8"), "x");
     assert.equal(fs.readFileSync(failedCounter, "utf8"), "xx");
     assert.equal(fs.existsSync(laterMarker), false);
