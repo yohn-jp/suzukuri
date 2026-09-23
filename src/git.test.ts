@@ -80,6 +80,50 @@ test("git diff name-status input is deterministic and supports copies", () => {
   );
 });
 
+test("git diff and status preserve literal backslashes in repository paths", () => {
+  const oldPath = String.raw`src/space name\twith-tab\n\345\220\215\\old.ts`;
+  const newPath = String.raw`src/space name\twith-tab\n\345\220\215\\new.ts`;
+  const diff = decodeGitDiff({
+    content: [
+      `diff --git "a/${oldPath}" "b/${newPath}"`,
+      "similarity index 90%",
+      `rename from "${oldPath}"`,
+      `rename to "${newPath}"`,
+      "",
+    ].join("\n"),
+  });
+
+  assert.deepEqual(
+    diff.files.map(({ path, oldPath: prior, status }) => ({ path, oldPath: prior, status })),
+    [
+      {
+        path: "src/space name\twith-tab\n名\\new.ts",
+        oldPath: "src/space name\twith-tab\n名\\old.ts",
+        status: "renamed",
+      },
+    ],
+  );
+
+  const status = decodeGitStatus({ content: `?? "${newPath}"\n` });
+  assert.equal(status.entries[0]?.path, "src/space name\twith-tab\n名\\new.ts");
+  assert.equal(decodeGitDiff({ content: "M\tsrc/nested/file.ts\n" }).files[0]?.path, "src/nested/file.ts");
+});
+
+test("git diff and status reject malformed and out-of-range quoted octal escapes", () => {
+  const malformedStatus = String.raw`?? "bad\8name"` + "\n";
+  const outOfRangeStatus = String.raw`?? "bad\400name"` + "\n";
+  const outOfRangeDiff = `M\t${String.raw`"bad\400name"`}\n`;
+
+  assert.throws(() => decodeGitStatus({ content: malformedStatus }), /unsupported escape in quoted git path/);
+  assert.throws(() => decodeGitStatus({ content: outOfRangeStatus }), /outside the byte range/);
+  assert.throws(() => decodeGitDiff({ content: outOfRangeDiff }), /outside the byte range/);
+});
+
+test("git path traversal rejection remains consistent for diff and status", () => {
+  assert.throws(() => decodeGitDiff({ content: "M\t../outside.ts\n" }), /escapes repository root/);
+  assert.throws(() => decodeGitStatus({ content: "?? ../outside.ts\n" }), /escapes repository root/);
+});
+
 test("git diff treats header-looking lines inside hunks as content", () => {
   const model = decodeGitDiff({
     content: "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n--- removed\n+++ added\n",
