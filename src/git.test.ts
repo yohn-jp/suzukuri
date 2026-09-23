@@ -119,6 +119,18 @@ test("git diff and status reject malformed and out-of-range quoted octal escapes
   assert.throws(() => decodeGitDiff({ content: outOfRangeDiff }), /outside the byte range/);
 });
 
+test("git status requires a distinct closing delimiter after quoted escapes", () => {
+  const validEscapedQuote = String.raw`?? "valid\"quote\\leaf"` + "\n";
+  const validTrailingBackslash = '?? "valid\\\\"' + "\n";
+  const terminalEscapedQuote = String.raw`?? "bad\"` + "\n";
+  const incompleteTrailingEscape = '?? "bad\\' + "\n";
+
+  assert.equal(decodeGitStatus({ content: validEscapedQuote }).entries[0]?.path, 'valid"quote\\leaf');
+  assert.equal(decodeGitStatus({ content: validTrailingBackslash }).entries[0]?.path, "valid\\");
+  assert.throws(() => decodeGitStatus({ content: terminalEscapedQuote }), /invalid escape in quoted git path/);
+  assert.throws(() => decodeGitStatus({ content: incompleteTrailingEscape }), /invalid quoted git path/);
+});
+
 test("git path traversal rejection remains consistent for diff and status", () => {
   assert.throws(() => decodeGitDiff({ content: "M\t../outside.ts\n" }), /escapes repository root/);
   assert.throws(() => decodeGitStatus({ content: "?? ../outside.ts\n" }), /escapes repository root/);

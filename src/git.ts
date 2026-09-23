@@ -597,6 +597,9 @@ function decodeGitQuotedPath(value: string, lineNumber: number): string {
       text += character;
       continue;
     }
+    if (index + 1 === value.length - 1) {
+      throw invalidGitInput("invalid escape in quoted git path", lineNumber);
+    }
     const next = value[++index];
     if (next === undefined) {
       throw invalidGitInput("invalid escape in quoted git path", lineNumber);
