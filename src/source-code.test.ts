@@ -102,7 +102,7 @@ test("syntax failures are explicit and do not select generic-text", () => {
 
 test("TypeScript source admission rejects JavaScript kinds and conflicting media types", () => {
   const unsupportedSources: ProjectionSource[] = [
-    ...["js", "jsx", "mjs", "cjs"].map((extension) => ({
+    ...["js", "jsx", "mjs", "cjs", "json", "txt", "py"].map((extension) => ({
       identity: `fixtures/example.${extension}`,
       mediaType: "text/typescript",
       content: "export const value = 1;",
@@ -115,6 +115,11 @@ test("TypeScript source admission rejects JavaScript kinds and conflicting media
     {
       identity: "fixtures/example.ts",
       mediaType: "text/tsx",
+      content: "export const value = 1;",
+    },
+    {
+      identity: "fixtures/example.tsx",
+      mediaType: "application/json",
       content: "export const value = 1;",
     },
   ];
@@ -133,6 +138,21 @@ test("TSX source identity continues to produce TSX semantics", () => {
     content: "export const Component = () => <div />;",
   });
   assert.equal(model.language, "tsx");
+});
+
+test("extensionless source identity is admitted when its media type identifies TypeScript", () => {
+  const model = decodeTypeScriptSource({
+    identity: "conformance:source-symbol-index",
+    mediaType: "text/typescript",
+    content: "export const value: number = 1;",
+  });
+  assert.equal(model.language, "typescript");
+
+  const tsx = decodeTypeScriptSource({
+    mediaType: "text/tsx",
+    content: "export const Component = () => <div />;",
+  });
+  assert.equal(tsx.language, "tsx");
 });
 
 test("symbol index and selected symbol views use the shared budget/rendering core", () => {

@@ -392,14 +392,14 @@ function parseTypeScriptSource(source: ProjectionSource): ParseResult {
 
 function sourceKindAdmissionFailure(source: ProjectionSource): ParseFailure | undefined {
   const identity = source.identity?.trim() ?? "";
-  const normalizedIdentity = identity.toLowerCase();
   const mediaType = source.mediaType?.trim().toLowerCase() ?? "";
-  const hasJavaScriptIdentity = /\.(?:js|jsx|mjs|cjs)$/.test(normalizedIdentity);
-  const hasJavaScriptMediaType =
-    mediaType.includes("javascript") || mediaType.includes("ecmascript") || /(?:^|[+/])jsx(?:$|[;+])/.test(mediaType);
-  const hasConflictingTsxMediaType = normalizedIdentity.endsWith(".ts") && isTsxMediaType(mediaType);
+  const identityKind = identity === "" ? undefined : sourceKindForIdentity(identity);
+  const mediaTypeKind = mediaType === "" ? undefined : sourceKindForMediaType(mediaType);
+  const hasUnsupportedIdentity = identityKind === "unsupported";
+  const hasUnsupportedMediaType = mediaType !== "" && mediaTypeKind === undefined;
+  const hasConflictingTsxMediaType = identityKind === "typescript" && mediaTypeKind === "tsx";
 
-  if (hasJavaScriptIdentity || hasJavaScriptMediaType || hasConflictingTsxMediaType) {
+  if (hasUnsupportedIdentity || hasUnsupportedMediaType || hasConflictingTsxMediaType) {
     return {
       issue: {
         code: "UNSUPPORTED_TYPESCRIPT_SOURCE_KIND",
@@ -411,6 +411,39 @@ function sourceKindAdmissionFailure(source: ProjectionSource): ParseFailure | un
         },
       },
     };
+  }
+  return undefined;
+}
+
+function sourceKindForIdentity(identity: string): TypeScriptSourceLanguage | "unsupported" | undefined {
+  const normalized = identity.toLowerCase();
+  if (normalized.endsWith(".tsx")) {
+    return "tsx";
+  }
+  if (normalized.endsWith(".ts")) {
+    return "typescript";
+  }
+  const lastSeparator = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  const lastDot = normalized.lastIndexOf(".");
+  if (lastDot > lastSeparator && lastDot < normalized.length - 1) {
+    return "unsupported";
+  }
+  return undefined;
+}
+
+function sourceKindForMediaType(mediaType: string): TypeScriptSourceLanguage | undefined {
+  if (
+    mediaType.includes("javascript") ||
+    mediaType.includes("ecmascript") ||
+    /(?:^|[+/])(?:js|jsx|mjs|cjs)(?:$|[;+])/.test(mediaType)
+  ) {
+    return undefined;
+  }
+  if (isTsxMediaType(mediaType)) {
+    return "tsx";
+  }
+  if (mediaType.includes("typescript")) {
+    return "typescript";
   }
   return undefined;
 }
