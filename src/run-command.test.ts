@@ -215,6 +215,157 @@ test('a generic command with explicit reuse "fingerprint" is cached like test/ve
   }
 });
 
+test("stepped verification reuses independent scoped results and invalidates only a changed step", async () => {
+  const { repository, directory, config } = gitFixture("suzukuri-run-step-reuse-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  const lines: string[] = [];
+  const firstCounter = path.join(directory, "first.count");
+  const changedCounter = path.join(directory, "changed.count");
+  const secondCounter = path.join(directory, "second.count");
+  const firstProducer = path.join(directory, "first.mjs");
+  const changedProducer = path.join(directory, "changed.mjs");
+  const secondProducer = path.join(directory, "second.mjs");
+  fs.writeFileSync(path.join(repository, "one.txt"), "one");
+  fs.writeFileSync(path.join(repository, "two.txt"), "two");
+  execFileSync("git", ["add", "one.txt", "two.txt"], { cwd: repository });
+  execFileSync("git", ["commit", "-m", "step inputs", "--quiet"], { cwd: repository });
+  fs.writeFileSync(
+    firstProducer,
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(firstCounter)}, "x");\n`,
+  );
+  fs.writeFileSync(
+    changedProducer,
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(changedCounter)}, "x");\n`,
+  );
+  fs.writeFileSync(
+    secondProducer,
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(secondCounter)}, "x");\n`,
+  );
+  console.log = (line: string) => lines.push(line);
+  try {
+    process.chdir(repository);
+    const writeConfig = (producer: string) =>
+      fs.writeFileSync(
+        config,
+        JSON.stringify({
+          schemaVersion: 1,
+          commands: {
+            verify: {
+              projection: "verification-result",
+              reuse: "fingerprint",
+              steps: [
+                { name: "first", argv: [process.execPath, producer], inputs: ["one.txt"] },
+                { name: "second", argv: [process.execPath, secondProducer], inputs: ["two.txt"] },
+              ],
+            },
+          },
+        }),
+      );
+    writeConfig(firstProducer);
+
+    await runRunCommand({ positionals: ["verify"], options: { config } });
+    await runRunCommand({ positionals: ["verify"], options: { config } });
+    fs.writeFileSync(path.join(repository, "one.txt"), "changed");
+    await runRunCommand({ positionals: ["verify"], options: { config } });
+    writeConfig(changedProducer);
+    await runRunCommand({ positionals: ["verify"], options: { config } });
+
+    assert.deepEqual(JSON.parse(lines[0] ?? "{}").steps, [
+      { name: "first", execution: "executed" },
+      { name: "second", execution: "executed" },
+    ]);
+    assert.deepEqual(JSON.parse(lines[1] ?? "{}").steps, [
+      { name: "first", execution: "reused" },
+      { name: "second", execution: "reused" },
+    ]);
+    assert.deepEqual(JSON.parse(lines[2] ?? "{}").steps, [
+      { name: "first", execution: "executed" },
+      { name: "second", execution: "reused" },
+    ]);
+    assert.deepEqual(JSON.parse(lines[3] ?? "{}").steps, [
+      { name: "first", execution: "executed" },
+      { name: "second", execution: "reused" },
+    ]);
+    assert.equal(fs.readFileSync(firstCounter, "utf8"), "xx");
+    assert.equal(fs.readFileSync(changedCounter, "utf8"), "x");
+    assert.equal(fs.readFileSync(secondCounter, "utf8"), "x");
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a cached failing step is reused and still short-circuits later steps", async () => {
+  const { repository, directory, config } = gitFixture("suzukuri-run-step-failure-reuse-");
+  const originalCwd = process.cwd();
+  const originalLog = console.log;
+  const lines: string[] = [];
+  const firstCounter = path.join(directory, "first.count");
+  const failedCounter = path.join(directory, "failed.count");
+  const laterMarker = path.join(directory, "later.marker");
+  const firstProducer = path.join(directory, "first.mjs");
+  const failedProducer = path.join(directory, "failed.mjs");
+  const laterProducer = path.join(directory, "later.mjs");
+  for (const input of ["one.txt", "two.txt"]) fs.writeFileSync(path.join(repository, input), input);
+  execFileSync("git", ["add", "one.txt", "two.txt"], { cwd: repository });
+  execFileSync("git", ["commit", "-m", "step inputs", "--quiet"], { cwd: repository });
+  fs.writeFileSync(
+    firstProducer,
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(firstCounter)}, "x");\n`,
+  );
+  fs.writeFileSync(
+    failedProducer,
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(failedCounter)}, "x"); process.exitCode = 1;\n`,
+  );
+  fs.writeFileSync(
+    laterProducer,
+    `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(laterMarker)}, "ran");\n`,
+  );
+  fs.writeFileSync(
+    config,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: {
+        verify: {
+          projection: "verification-result",
+          reuse: "fingerprint",
+          steps: [
+            { name: "first", argv: [process.execPath, firstProducer], inputs: ["one.txt"] },
+            { name: "failed", argv: [process.execPath, failedProducer], inputs: ["two.txt"] },
+            { name: "later", argv: [process.execPath, laterProducer] },
+          ],
+        },
+      },
+    }),
+  );
+  console.log = (line: string) => lines.push(line);
+  try {
+    process.chdir(repository);
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 1);
+    fs.writeFileSync(path.join(repository, "two.txt"), "changed");
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 1);
+    assert.equal(await runRunCommand({ positionals: ["verify"], options: { config } }), 1);
+
+    assert.deepEqual(JSON.parse(lines[1] ?? "{}").steps, [
+      { name: "first", execution: "reused" },
+      { name: "failed", execution: "executed" },
+    ]);
+    assert.deepEqual(JSON.parse(lines[2] ?? "{}").steps, [
+      { name: "first", execution: "reused" },
+      { name: "failed", execution: "reused" },
+    ]);
+    assert.equal(fs.readFileSync(firstCounter, "utf8"), "x");
+    assert.equal(fs.readFileSync(failedCounter, "utf8"), "xx");
+    assert.equal(fs.existsSync(laterMarker), false);
+  } finally {
+    process.chdir(originalCwd);
+    console.log = originalLog;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("changing a registered command's projection invalidates any prior cached reuse", async () => {
   const { repository, directory, config, counter } = gitFixture("suzukuri-run-reuse-projection-change-");
   const originalCwd = process.cwd();

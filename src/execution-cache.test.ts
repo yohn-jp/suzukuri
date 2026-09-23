@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { lookupExecutionCache, markResultReused } from "./execution-cache.js";
+import { lookupExecutionCache, lookupExecutionStepCache, markResultReused } from "./execution-cache.js";
 
 const CACHE_DIRECTORY = ".suzukuri/cache/execution-results";
 
@@ -217,6 +217,85 @@ test("a repository content change between lookup and commit is not cached", asyn
     const restored = await lookupExecutionCache("test", command, { cwd: directory });
     assert.ok(restored !== undefined);
     assert.equal(restored.cached, undefined);
+  } finally {
+    cleanup(directory);
+  }
+});
+
+test("step cache identities isolate producer definitions and declared input scopes", async () => {
+  const directory = initRepository("suzukuri-cache-step-independent-");
+  try {
+    fs.writeFileSync(path.join(directory, "b.txt"), "beta");
+    execFileSync("git", ["add", "b.txt"], { cwd: directory });
+    execFileSync("git", ["commit", "-m", "step inputs", "--quiet"], { cwd: directory });
+    const command = {
+      steps: [
+        { name: "one", argv: ["node", "one.mjs"] as const, inputs: ["a.txt"] },
+        { name: "two", argv: ["node", "two.mjs"] as const, inputs: ["b.txt"] },
+      ] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
+    const first = await lookupExecutionStepCache("verify", command, command.steps[0], { cwd: directory });
+    const second = await lookupExecutionStepCache("verify", command, command.steps[1], { cwd: directory });
+    assert.ok(first);
+    assert.ok(second);
+    await first.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
+    await second.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
+
+    fs.writeFileSync(path.join(directory, "b.txt"), "changed");
+    const firstAfterOtherInputChange = await lookupExecutionStepCache("verify", command, command.steps[0], {
+      cwd: directory,
+    });
+    const secondAfterInputChange = await lookupExecutionStepCache("verify", command, command.steps[1], {
+      cwd: directory,
+    });
+    assert.deepEqual(firstAfterOtherInputChange?.cached?.printed, { status: "passed" });
+    assert.equal(secondAfterInputChange?.cached, undefined);
+    assert.ok(secondAfterInputChange);
+    await secondAfterInputChange.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
+
+    const changedCommand = {
+      ...command,
+      steps: [{ ...command.steps[0], argv: ["node", "replacement.mjs"] as const }, command.steps[1]] as const,
+    };
+    assert.equal(
+      (await lookupExecutionStepCache("verify", changedCommand, changedCommand.steps[0], { cwd: directory }))?.cached,
+      undefined,
+    );
+    assert.deepEqual(
+      (await lookupExecutionStepCache("verify", changedCommand, changedCommand.steps[1], { cwd: directory }))?.cached
+        ?.printed,
+      { status: "passed" },
+    );
+  } finally {
+    cleanup(directory);
+  }
+});
+
+test("an omitted step input scope fingerprints the whole repository", async () => {
+  const directory = initRepository("suzukuri-cache-step-default-scope-");
+  try {
+    fs.writeFileSync(path.join(directory, "b.txt"), "beta");
+    execFileSync("git", ["add", "b.txt"], { cwd: directory });
+    execFileSync("git", ["commit", "-m", "unscoped input", "--quiet"], { cwd: directory });
+    const command = {
+      steps: [
+        { name: "one", argv: ["node", "one.mjs"] as const },
+        { name: "two", argv: ["node", "two.mjs"] as const },
+      ] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
+    const lookup = await lookupExecutionStepCache("verify", command, command.steps[0], { cwd: directory });
+    assert.ok(lookup);
+    await lookup.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
+
+    fs.writeFileSync(path.join(directory, "b.txt"), "changed");
+    assert.equal(
+      (await lookupExecutionStepCache("verify", command, command.steps[0], { cwd: directory }))?.cached,
+      undefined,
+    );
   } finally {
     cleanup(directory);
   }

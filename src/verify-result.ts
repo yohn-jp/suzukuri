@@ -22,6 +22,7 @@ export interface VerifyResult {
   readonly truncated?: boolean;
   readonly exitCode?: number | null;
   readonly signal?: string | null;
+  readonly steps?: readonly { readonly name: string; readonly execution: "executed" | "reused" }[];
 }
 
 export const verifyResultContract: SemanticContract<VerifyResult> = Object.freeze({
@@ -90,6 +91,9 @@ export function validateVerifyResult(value: unknown): ValidationResult {
   if (value.status === "failed" && value.completeness === "incomplete" && value.stage !== "unknown") {
     issues.push({ code: "incomplete-stage", message: "incomplete failures must use the unknown stage", path: "stage" });
   }
+  if (value.steps !== undefined && !isValidStepExecutions(value.steps)) {
+    issues.push({ code: "steps", message: "steps must contain named executed or reused results", path: "steps" });
+  }
   return issues.length === 0 ? validationSuccess() : validationFailure(issues);
 }
 
@@ -108,11 +112,25 @@ export function normalizeVerifyResult(value: unknown): VerifyResult {
     ...(input.truncated === undefined ? {} : { truncated: input.truncated }),
     ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
+    ...(input.steps === undefined ? {} : { steps: input.steps.map((step) => ({ ...step })) }),
   };
 }
 
 export function isVerifyResult(value: unknown): value is VerifyResult {
   return validateVerifyResult(value).valid;
+}
+
+function isValidStepExecutions(value: unknown): value is NonNullable<VerifyResult["steps"]> {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (step) =>
+        isRecord(step) &&
+        typeof step.name === "string" &&
+        step.name.length > 0 &&
+        (step.execution === "executed" || step.execution === "reused"),
+    )
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

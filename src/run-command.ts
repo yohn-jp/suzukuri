@@ -1,6 +1,6 @@
 import { createBudget, stableJsonStringify } from "./core.js";
 import { createBuiltinProjectionCore } from "./builtin.js";
-import { lookupExecutionCache, markResultReused } from "./execution-cache.js";
+import { lookupExecutionCache, lookupExecutionStepCache, markResultReused } from "./execution-cache.js";
 import {
   ExecutionError,
   isSteppedExecutionCommand,
@@ -11,8 +11,10 @@ import {
   runBoundedProcess,
   type ExecutionCommand,
   type ExecutionCommandStep,
+  type SteppedExecutionCommand,
 } from "./execution.js";
 import { GENERIC_RESULT_SCHEMA_VERSION, type GenericCommandResult } from "./generic-result.js";
+import { isTestResult } from "./test-result.js";
 import { isVerifyResult, VERIFY_RESULT_SCHEMA_VERSION, type VerifyResult } from "./verify-result.js";
 
 type OptionValue = string | true;
@@ -91,6 +93,12 @@ export async function executeRegisteredCommand(
   parsed: RunCommandArguments,
 ): Promise<number> {
   const format = outputFormat(parsed);
+  if (isSteppedExecutionCommand(command) && command.projection !== "generic") {
+    const outcome = await runSteps(commandName, command);
+    const printed = withStepExecutions(outcome.printed, outcome.steps);
+    console.log(format === "text" ? renderText(command.projection, printed) : stableJsonStringify(printed));
+    return processResultExitCode(outcome);
+  }
   const lookup = await lookupExecutionCache(commandName, command);
   if (lookup?.cached !== undefined) {
     const reused = markResultReused(lookup.cached.printed);
@@ -99,7 +107,7 @@ export async function executeRegisteredCommand(
   }
 
   const outcome = isSteppedExecutionCommand(command)
-    ? await runSteps(command.steps)
+    ? await runCommandSteps(command.steps)
     : {
         ...(await runBoundedProcess(command.argv)),
         adapter: command.adapter,
@@ -115,15 +123,9 @@ export async function executeRegisteredCommand(
   return processResultExitCode(outcome);
 }
 
-/**
- * Runs ordered steps sequentially via the shared bounded-step runner and
- * reduces them to the single outcome the rest of the pipeline projects: on
- * failure, the failing step (later steps never ran); on success, the final
- * step, carrying that step's own declared adapter/view/budget so a
- * specialized projection honors per-step configuration rather than command-
- * level defaults that don't exist for a stepped command.
- */
-async function runSteps(steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]]): Promise<CommandOutcome> {
+async function runCommandSteps(
+  steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]],
+): Promise<CommandOutcome> {
   const result = await runBoundedCommandSteps(steps);
   const resolved = result.failedStep ?? result.steps[result.steps.length - 1];
   const definition = steps.find((step) => step.name === resolved.name);
@@ -139,6 +141,64 @@ async function runSteps(steps: readonly [ExecutionCommandStep, ...ExecutionComma
     view: definition?.view,
     budget: definition?.budget,
   };
+}
+
+/** Runs ordered verification steps, reusing each exact producer identity independently and stopping on failure. */
+interface StepExecutionSummary {
+  readonly name: string;
+  readonly execution: "executed" | "reused";
+}
+
+interface SteppedCommandOutcome {
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly printed: unknown;
+  readonly steps: readonly StepExecutionSummary[];
+}
+
+async function runSteps(commandName: string, command: SteppedExecutionCommand): Promise<SteppedCommandOutcome> {
+  const steps: StepExecutionSummary[] = [];
+  let finalOutcome: Pick<SteppedCommandOutcome, "exitCode" | "signal" | "printed"> | undefined;
+  for (const [index, step] of command.steps.entries()) {
+    const lookup = await lookupExecutionStepCache(commandName, command, step);
+    const cached = lookup?.cached;
+    const finalStep = index === command.steps.length - 1;
+    const cachedResultIsProjectable =
+      command.projection !== "test-result" || !finalStep || (cached !== undefined && isTestResult(cached.printed));
+    let outcome: Pick<SteppedCommandOutcome, "exitCode" | "signal" | "printed">;
+    if (cached !== undefined && cachedResultIsProjectable) {
+      outcome = cached;
+      steps.push({ name: step.name, execution: "reused" });
+    } else {
+      const process = await runBoundedProcess(step.argv, { maxOutputBytes: step.budget });
+      const commandOutcome: CommandOutcome = {
+        ...process,
+        stage: step.name,
+        adapter: step.adapter,
+        view: step.view,
+        budget: step.budget,
+      };
+      const needsTestResult =
+        command.projection !== "test-result" || process.exitCode !== 0 || process.signal !== null || finalStep;
+      const printed = needsTestResult
+        ? projectOutcome(commandName, command.projection, commandOutcome)
+        : { status: "passed" };
+      outcome = { exitCode: process.exitCode, signal: process.signal, printed };
+      if (lookup !== undefined) await lookup.commit({ ...outcome });
+      steps.push({ name: step.name, execution: "executed" });
+    }
+    finalOutcome = outcome;
+    if (outcome.exitCode !== 0 || outcome.signal !== null) break;
+  }
+  if (finalOutcome === undefined) {
+    throw new RunCommandError("RUN_STEPS_EMPTY", "A stepped command must contain at least one step.");
+  }
+  return { ...finalOutcome, steps };
+}
+
+function withStepExecutions(printed: unknown, steps: readonly StepExecutionSummary[]): unknown {
+  if (!isRecord(printed)) return printed;
+  return { ...printed, steps };
 }
 
 function projectOutcome(
@@ -261,12 +321,27 @@ function renderText(projection: ExecutionCommand["projection"], printed: unknown
     const lines = [`status: ${printed.status}`, `completeness: ${printed.completeness}`];
     if (printed.stage !== undefined) lines.push(`stage: ${printed.stage}`);
     if (printed.diagnostic !== undefined) lines.push(`diagnostic: ${printed.diagnostic}`);
+    lines.push(...stepExecutionLines(printed));
     return lines.join("\n");
   }
   if (projection === "generic" && isRecord(printed) && typeof printed.status === "string") {
-    return `command: ${String(printed.command)}\nstatus: ${String(printed.status)}\ncompleteness: ${String(printed.completeness)}`;
+    const lines = [
+      `command: ${String(printed.command)}`,
+      `status: ${String(printed.status)}`,
+      `completeness: ${String(printed.completeness)}`,
+    ];
+    return lines.join("\n");
   }
   return stableJsonStringify(printed);
+}
+
+function stepExecutionLines(value: unknown): string[] {
+  if (!isRecord(value) || !Array.isArray(value.steps)) return [];
+  return value.steps.flatMap((step) =>
+    isRecord(step) && typeof step.name === "string" && (step.execution === "executed" || step.execution === "reused")
+      ? [`step: ${step.name} (${step.execution})`]
+      : [],
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
