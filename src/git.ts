@@ -597,6 +597,9 @@ function decodeGitQuotedPath(value: string, lineNumber: number): string {
       text += character;
       continue;
     }
+    if (index + 1 === value.length - 1) {
+      throw invalidGitInput("invalid escape in quoted git path", lineNumber);
+    }
     const next = value[++index];
     if (next === undefined) {
       throw invalidGitInput("invalid escape in quoted git path", lineNumber);
@@ -617,7 +620,11 @@ function decodeGitQuotedPath(value: string, lineNumber: number): string {
       for (let count = 0; count < 2 && /^[0-7]$/.test(value[index + 1] ?? ""); count += 1) {
         octal += value[++index];
       }
-      bytes.push(Number.parseInt(octal, 8));
+      const byte = Number.parseInt(octal, 8);
+      if (byte > 0xff) {
+        throw invalidGitInput("octal escape in quoted git path is outside the byte range", lineNumber);
+      }
+      bytes.push(byte);
       continue;
     }
     throw invalidGitInput(`unsupported escape in quoted git path: \\${next}`, lineNumber);
@@ -641,7 +648,6 @@ function normalizeGitPath(value: string, prefix: "a" | "b" | undefined, lineNumb
   if (prefix !== undefined && path.startsWith(`${prefix}/`)) {
     path = path.slice(2);
   }
-  path = path.replaceAll("\\", "/");
   if (path.startsWith("/") || path === "") {
     throw invalidGitInput("git path must be relative and non-empty", lineNumber);
   }
