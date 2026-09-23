@@ -40,6 +40,7 @@ export interface TestResult {
   readonly counts: TestCounts;
   readonly failures: readonly TestFailure[];
   readonly durationMs?: number;
+  readonly steps?: readonly { readonly name: string; readonly execution: "executed" | "reused" }[];
 }
 
 export const testResultContract: SemanticContract<TestResult> = Object.freeze({
@@ -79,6 +80,9 @@ export function validateTestResult(value: unknown): ValidationResult {
   if (value.durationMs !== undefined && !isDuration(value.durationMs)) {
     issues.push({ code: "duration", message: "durationMs must be a non-negative finite number", path: "durationMs" });
   }
+  if (value.steps !== undefined && !isValidStepExecutions(value.steps)) {
+    issues.push({ code: "steps", message: "steps must contain named executed or reused results", path: "steps" });
+  }
   if (isValidCounts(value.counts) && Array.isArray(value.failures) && value.failures.length > value.counts.failed) {
     issues.push({ code: "failure-count", message: "failures cannot exceed the failed count", path: "failures" });
   }
@@ -103,6 +107,7 @@ export function normalizeTestResult(value: unknown): TestResult {
     counts: { ...input.counts },
     failures,
     ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
+    ...(input.steps === undefined ? {} : { steps: input.steps.map((step) => ({ ...step })) }),
   };
 }
 
@@ -146,6 +151,19 @@ function isValidCounts(value: unknown): value is TestCounts {
       (field) => Number.isSafeInteger(value[field]) && (value[field] as number) >= 0,
     ) &&
     (value.total as number) === (value.passed as number) + (value.failed as number) + (value.skipped as number)
+  );
+}
+
+function isValidStepExecutions(value: unknown): value is NonNullable<TestResult["steps"]> {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (step) =>
+        isRecord(step) &&
+        typeof step.name === "string" &&
+        step.name.length > 0 &&
+        (step.execution === "executed" || step.execution === "reused"),
+    )
   );
 }
 

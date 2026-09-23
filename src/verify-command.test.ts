@@ -185,6 +185,10 @@ test("verify with ordered steps stops at the first failed step and reports its d
     assert.equal(result.status, "failed");
     assert.equal(result.stage, "typecheck");
     assert.equal(result.completeness, "complete");
+    assert.deepEqual(result.steps, [
+      { name: "lint", execution: "executed" },
+      { name: "typecheck", execution: "executed" },
+    ]);
     assert.equal(fs.existsSync(marker), false, "a step after the failing one must never run");
   } finally {
     console.log = originalLog;
@@ -220,6 +224,10 @@ test("verify with ordered steps reports success once every step passes", async (
       completeness: "complete",
       status: "passed",
       version: VERIFY_RESULT_SCHEMA_VERSION,
+      steps: [
+        { name: "lint", execution: "executed" },
+        { name: "test", execution: "executed" },
+      ],
     });
   } finally {
     console.log = originalLog;

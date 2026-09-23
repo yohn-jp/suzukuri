@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { stableJsonStringify } from "./core.js";
-import { isSteppedExecutionCommand, type ExecutionCommand, type ExecutionCommandName } from "./execution.js";
+import {
+  isSteppedExecutionCommand,
+  type ExecutionCommand,
+  type ExecutionCommandName,
+  type ExecutionCommandStep,
+  type SteppedExecutionCommand,
+} from "./execution.js";
 import { computeRepositoryFingerprint, RepositoryFingerprintError } from "./repository-fingerprint.js";
 
 export const EXECUTION_CACHE_SCHEMA_VERSION = 1 as const;
@@ -189,6 +195,33 @@ export async function lookupExecutionCache(
       ? undefined
       : [...new Set([...(command.inputs ?? []), ...command.steps.flatMap((step) => step.inputs ?? [])])]
     : command.inputs;
+  return lookupCacheForIdentity(commandName, command, inputs, options);
+}
+
+/** Resolves a separate cache identity and input fingerprint for one ordered step. */
+export async function lookupExecutionStepCache(
+  commandName: ExecutionCommandName,
+  command: SteppedExecutionCommand,
+  step: ExecutionCommandStep,
+  options: ExecutionCacheOptions = {},
+): Promise<ExecutionCacheLookup | undefined> {
+  if (command.reuse === "never") return undefined;
+  const scopedInputs = [...new Set([...(command.inputs ?? []), ...(step.inputs ?? [])])];
+  const inputs = scopedInputs.length === 0 ? undefined : scopedInputs;
+  const identity: SteppedExecutionCommand = {
+    steps: [{ ...step, ...(inputs === undefined ? {} : { inputs }) }],
+    projection: command.projection,
+    reuse: command.reuse,
+  };
+  return lookupCacheForIdentity(commandName, identity, inputs, options);
+}
+
+async function lookupCacheForIdentity(
+  commandName: ExecutionCommandName,
+  command: ExecutionCommand,
+  inputs: readonly string[] | undefined,
+  options: ExecutionCacheOptions,
+): Promise<ExecutionCacheLookup | undefined> {
   let fingerprint: string;
   try {
     fingerprint = await computeRepositoryFingerprint(options.cwd, inputs);
