@@ -42,6 +42,36 @@ const packageJson = require("../package.json") as { version: string };
 type OptionValue = string | true;
 type OutputFormat = "json" | "text";
 
+/** CLI source bytes have a finite default bound independent of projection budgets. */
+const DEFAULT_SOURCE_BYTE_LIMIT = 10 * 1024 * 1024;
+const SOURCE_READ_CHUNK_BYTES = 64 * 1024;
+
+const VALUE_OPTIONS = new Set([
+  "adapter",
+  "budget",
+  "commands",
+  "config",
+  "contract",
+  "execution",
+  "format",
+  "input",
+  "max-bytes",
+  "max-input-bytes",
+  "max-raw-bytes",
+  "name",
+  "output",
+  "path",
+  "profile",
+  "profile-file",
+  "profiles",
+  "renderer",
+  "scope",
+  "source",
+  "view",
+]);
+
+const BOOLEAN_OPTIONS = new Set(["diagnose", "doctor", "dry-run", "help", "human", "json", "version", "y", "yes"]);
+
 interface ParsedArguments {
   readonly positionals: readonly string[];
   readonly options: Readonly<Record<string, OptionValue>>;
@@ -63,38 +93,39 @@ class CliUsageError extends Error {
 }
 
 export async function runCli(argv: string[]): Promise<number> {
-  const parsed = parseArguments(argv);
-  const command = parsed.positionals[0];
+  let parsed: ParsedArguments | undefined;
+  try {
+    parsed = parseArguments(argv);
+    const command = parsed.positionals[0];
 
-  if (command === undefined) {
-    if (hasOption(parsed, "version")) {
+    if (command === undefined) {
+      if (hasOption(parsed, "version")) {
+        printVersion();
+        return 0;
+      }
+      if (hasOption(parsed, "diagnose", "doctor")) {
+        printDiagnose();
+        return 0;
+      }
+      printHelpFor(parsed.positionals, parsed.options.help);
+      return hasOption(parsed, "help") ? 0 : 1;
+    }
+
+    if (command === "--help" || command === "-h") {
+      printHelpFor([], true);
+      return 0;
+    }
+
+    if (command === "--version" || command === "-v") {
       printVersion();
       return 0;
     }
-    if (hasOption(parsed, "diagnose", "doctor")) {
+
+    if (command === "--diagnose" || command === "--doctor") {
       printDiagnose();
       return 0;
     }
-    printHelpFor(parsed.positionals, parsed.options.help);
-    return hasOption(parsed, "help") ? 0 : 1;
-  }
 
-  if (command === "--help" || command === "-h") {
-    printHelpFor([], true);
-    return 0;
-  }
-
-  if (command === "--version" || command === "-v") {
-    printVersion();
-    return 0;
-  }
-
-  if (command === "--diagnose" || command === "--doctor") {
-    printDiagnose();
-    return 0;
-  }
-
-  try {
     if (hasOption(parsed, "help", "h")) {
       printHelpFor(parsed.positionals, parsed.options.help);
       return 0;
@@ -144,10 +175,12 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   } catch (error) {
     let format: OutputFormat = "json";
-    try {
-      format = outputFormat(parsed);
-    } catch {
-      // If outputFormat itself throws (e.g., invalid --format), fall back to json
+    if (parsed !== undefined) {
+      try {
+        format = outputFormat(parsed);
+      } catch {
+        // If outputFormat itself throws (e.g., invalid --format), fall back to json.
+      }
     }
     printError(error, format);
     return 1;
@@ -330,7 +363,6 @@ function inspectRuntime(kind: InspectionKind) {
 function parseArguments(argv: readonly string[]): ParsedArguments {
   const positionals: string[] = [];
   const options: Record<string, OptionValue> = {};
-  const knownBooleanOptions = new Set(["help", "version", "human", "json", "diagnose", "doctor"]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "-") {
@@ -341,26 +373,36 @@ function parseArguments(argv: readonly string[]): ParsedArguments {
       positionals.push(argument);
       continue;
     }
-    const normalized = argument === "-h" ? "help" : argument === "-v" ? "version" : argument.slice(2);
+    const normalized =
+      argument === "-h" ? "help" : argument === "-v" ? "version" : argument.slice(argument.startsWith("--") ? 2 : 1);
     if (normalized === "") {
       throw new CliUsageError("Option name must not be empty.");
     }
     const equals = normalized.indexOf("=");
+    const name = equals === -1 ? normalized : normalized.slice(0, equals);
+    if (!VALUE_OPTIONS.has(name) && !BOOLEAN_OPTIONS.has(name)) {
+      throw new CliUsageError(`Unknown option: ${argument}.`, { option: name });
+    }
     if (equals !== -1) {
-      options[normalized.slice(0, equals)] = normalized.slice(equals + 1);
+      const value = normalized.slice(equals + 1);
+      if (BOOLEAN_OPTIONS.has(name)) {
+        if (name !== "help" || (value !== "full" && value !== "json")) {
+          throw new CliUsageError(`Option --${name} does not accept a value.`, { option: name });
+        }
+      }
+      options[name] = value;
       continue;
     }
-    if (knownBooleanOptions.has(normalized)) {
-      options[normalized] = true;
+    if (BOOLEAN_OPTIONS.has(name)) {
+      options[name] = true;
       continue;
     }
     const next = argv[index + 1];
-    if (next !== undefined && (next === "-" || !next.startsWith("-"))) {
-      options[normalized] = next;
-      index += 1;
-    } else {
-      options[normalized] = true;
+    if (next === undefined) {
+      throw new CliUsageError(`Option --${name} requires a value.`, { option: name });
     }
+    options[name] = next;
+    index += 1;
   }
   return { positionals, options };
 }
@@ -404,7 +446,46 @@ function readInput(parsed: ParsedArguments): Uint8Array {
   if (inputPath === undefined || inputPath.trim() === "") {
     throw new CliUsageError("The command requires --input <path|->.");
   }
-  return fs.readFileSync(inputPath === "-" ? 0 : inputPath);
+  if (inputPath === "-") {
+    return readBoundedSource(0);
+  }
+
+  const descriptor = fs.openSync(inputPath, "r");
+  try {
+    const stats = fs.fstatSync(descriptor);
+    if (stats.isFile() && stats.size > DEFAULT_SOURCE_BYTE_LIMIT) {
+      throw sourceTooLarge({ sizeBytes: stats.size });
+    }
+    return readBoundedSource(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function readBoundedSource(descriptor: number): Uint8Array {
+  const chunks: Buffer[] = [];
+  let observedBytes = 0;
+  while (true) {
+    const readLength = Math.min(SOURCE_READ_CHUNK_BYTES, DEFAULT_SOURCE_BYTE_LIMIT - observedBytes + 1);
+    const chunk = Buffer.allocUnsafe(readLength);
+    const bytesRead = fs.readSync(descriptor, chunk, 0, readLength, null);
+    if (bytesRead === 0) {
+      break;
+    }
+    observedBytes += bytesRead;
+    if (observedBytes > DEFAULT_SOURCE_BYTE_LIMIT) {
+      throw sourceTooLarge({ observedBytes });
+    }
+    chunks.push(chunk.subarray(0, bytesRead));
+  }
+  return Buffer.concat(chunks, observedBytes);
+}
+
+function sourceTooLarge(size: { readonly sizeBytes?: number; readonly observedBytes?: number }): CliUsageError {
+  return new CliUsageError(`CLI source exceeds the ${DEFAULT_SOURCE_BYTE_LIMIT}-byte input limit.`, {
+    limitBytes: DEFAULT_SOURCE_BYTE_LIMIT,
+    ...size,
+  });
 }
 
 function outputFormat(parsed: ParsedArguments): OutputFormat {
@@ -453,6 +534,7 @@ function printError(error: unknown, format: OutputFormat): void {
 
 const FULL_OPTION_REFERENCE: readonly string[] = [
   "--help[=full|json]  Print progressive help; use --help=full for the complete reference or --help=json for discovery.",
+  "--input <path|->  CLI source input is limited to 10 MiB, independent of the projection budget.",
   "--json  Emit structured JSON output (skill).",
   "--format json|text  JSON is the stable automation contract (skill defaults to human-readable output).",
   "--human  Use human-readable output.",

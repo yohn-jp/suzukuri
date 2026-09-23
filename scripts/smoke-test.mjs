@@ -4,6 +4,7 @@
 // only lists file contents — it never proves install or execution actually
 // work, which is the failure mode this guards against.
 import { spawnSync } from "node:child_process";
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -53,6 +54,224 @@ function packageBinTargets(packageDirectory) {
 function parseArgs(argv) {
   const index = argv.indexOf("--tarball");
   return { tarball: index === -1 ? undefined : argv[index + 1] };
+}
+
+function initVerificationRepository(repositoryDirectory, inputs) {
+  fs.mkdirSync(repositoryDirectory, { recursive: true });
+  run("git", ["init", "--quiet"], { cwd: repositoryDirectory });
+  run("git", ["config", "user.email", "suzukuri@example.invalid"], { cwd: repositoryDirectory });
+  run("git", ["config", "user.name", "Suzukuri Smoke Test"], { cwd: repositoryDirectory });
+  for (const [name, contents] of Object.entries(inputs)) {
+    fs.writeFileSync(path.join(repositoryDirectory, name), contents);
+  }
+  run("git", ["add", ...Object.keys(inputs)], { cwd: repositoryDirectory });
+  run("git", ["commit", "--quiet", "-m", "verification inputs"], { cwd: repositoryDirectory });
+}
+
+function installedVerify(launcher, repositoryDirectory, configPath, expectedExitCode, label) {
+  const result = spawnSync(launcher, ["verify", "--config", configPath], {
+    cwd: repositoryDirectory,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (result.error) fail(`${label} failed to start: ${result.error.message}`);
+  if (result.status !== expectedExitCode) {
+    fail(`${label} exited ${result.status}, expected ${expectedExitCode}:\n${result.stdout}\n${result.stderr}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    fail(`${label} did not return machine JSON: ${result.stdout}`);
+  }
+}
+
+function assertVerificationSteps(result, status, expectedSteps, label) {
+  assert.equal(result.status, status, `${label} status`);
+  assert.equal(result.completeness, "complete", `${label} completeness`);
+  assert.deepEqual(
+    result.steps?.map(({ name, execution }) => ({ name, execution })),
+    expectedSteps,
+    `${label} step executions`,
+  );
+  for (const step of result.steps ?? []) {
+    const evidence = step.evidence;
+    assert.ok(evidence, `${label} ${step.name} evidence`);
+    assert.equal(evidence.version, 1, `${label} ${step.name} evidence version`);
+    assert.equal(evidence.execution, step.execution, `${label} ${step.name} evidence execution`);
+    for (const field of ["identity", "producerIdentity", "inputFingerprint", "resultIdentity"]) {
+      assert.match(evidence[field], /^[a-f0-9]{64}$/, `${label} ${step.name} evidence ${field}`);
+    }
+  }
+  return result.steps;
+}
+
+function certifyInstalledVerificationReuse(launcher, fixtureDirectory) {
+  const directory = path.join(fixtureDirectory, "verification-reuse");
+  const repositoryDirectory = path.join(directory, "repository");
+  const configPath = path.join(directory, "commands.json");
+  const firstProducer = path.join(directory, "scoped-producer.mjs");
+  const changedProducer = path.join(directory, "changed-scoped-producer.mjs");
+  const stableProducer = path.join(directory, "stable-producer.mjs");
+  const firstCounter = path.join(directory, "scoped.count");
+  const stableCounter = path.join(directory, "stable.count");
+  fs.mkdirSync(directory, { recursive: true });
+  initVerificationRepository(repositoryDirectory, { "one.txt": "one\n", "two.txt": "two\n" });
+
+  const countedProducer = (counter) =>
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(counter)}, "x");\n`;
+  fs.writeFileSync(firstProducer, countedProducer(firstCounter));
+  fs.writeFileSync(changedProducer, countedProducer(firstCounter));
+  fs.writeFileSync(stableProducer, countedProducer(stableCounter));
+
+  const writeConfig = (scopedProducer) =>
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        commands: {
+          verify: {
+            projection: "verification-result",
+            reuse: "fingerprint",
+            tier: "authoritative",
+            steps: [
+              { name: "scoped", argv: [process.execPath, scopedProducer], inputs: ["one.txt"], tier: "focused" },
+              { name: "stable", argv: [process.execPath, stableProducer], inputs: ["two.txt"] },
+            ],
+          },
+        },
+      }),
+    );
+  writeConfig(firstProducer);
+
+  const first = installedVerify(launcher, repositoryDirectory, configPath, 0, "first tiered verify");
+  const firstSteps = assertVerificationSteps(
+    first,
+    "passed",
+    [
+      { name: "scoped", execution: "executed" },
+      { name: "stable", execution: "executed" },
+    ],
+    "first tiered verify",
+  );
+  assert.equal(firstSteps[0].evidence.tier, "focused");
+  assert.equal(firstSteps[1].evidence.tier, "authoritative");
+
+  const unchanged = installedVerify(launcher, repositoryDirectory, configPath, 0, "unchanged tiered verify");
+  const unchangedSteps = assertVerificationSteps(
+    unchanged,
+    "passed",
+    [
+      { name: "scoped", execution: "reused" },
+      { name: "stable", execution: "reused" },
+    ],
+    "unchanged tiered verify",
+  );
+  assert.equal(firstSteps[0].evidence.identity, unchangedSteps[0].evidence.identity);
+  assert.equal(firstSteps[1].evidence.identity, unchangedSteps[1].evidence.identity);
+  assert.equal(fs.readFileSync(firstCounter, "utf8"), "x");
+  assert.equal(fs.readFileSync(stableCounter, "utf8"), "x");
+
+  fs.writeFileSync(path.join(repositoryDirectory, "one.txt"), "changed one\n");
+  const changedInput = installedVerify(launcher, repositoryDirectory, configPath, 0, "scoped-input verify");
+  const changedInputSteps = assertVerificationSteps(
+    changedInput,
+    "passed",
+    [
+      { name: "scoped", execution: "executed" },
+      { name: "stable", execution: "reused" },
+    ],
+    "scoped-input verify",
+  );
+  assert.notEqual(firstSteps[0].evidence.identity, changedInputSteps[0].evidence.identity);
+  assert.equal(firstSteps[1].evidence.identity, changedInputSteps[1].evidence.identity);
+
+  writeConfig(changedProducer);
+  const changedDefinition = installedVerify(launcher, repositoryDirectory, configPath, 0, "producer-definition verify");
+  const changedDefinitionSteps = assertVerificationSteps(
+    changedDefinition,
+    "passed",
+    [
+      { name: "scoped", execution: "executed" },
+      { name: "stable", execution: "reused" },
+    ],
+    "producer-definition verify",
+  );
+  assert.notEqual(changedInputSteps[0].evidence.identity, changedDefinitionSteps[0].evidence.identity);
+  assert.equal(changedInputSteps[1].evidence.identity, changedDefinitionSteps[1].evidence.identity);
+  assert.equal(fs.readFileSync(firstCounter, "utf8"), "xxx");
+  assert.equal(fs.readFileSync(stableCounter, "utf8"), "x");
+}
+
+function certifyInstalledFailureReuse(launcher, fixtureDirectory) {
+  const directory = path.join(fixtureDirectory, "verification-failure");
+  const repositoryDirectory = path.join(directory, "repository");
+  const configPath = path.join(directory, "commands.json");
+  const passProducer = path.join(directory, "pass-producer.mjs");
+  const failProducer = path.join(directory, "fail-producer.mjs");
+  const laterProducer = path.join(directory, "later-producer.mjs");
+  const passCounter = path.join(directory, "pass.count");
+  const failCounter = path.join(directory, "fail.count");
+  const laterMarker = path.join(directory, "later.marker");
+  fs.mkdirSync(directory, { recursive: true });
+  initVerificationRepository(repositoryDirectory, { "pass.txt": "pass\n", "fail.txt": "fail\n" });
+  fs.writeFileSync(passProducer, `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(passCounter)}, "x");\n`);
+  fs.writeFileSync(
+    failProducer,
+    `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(failCounter)}, "x"); process.exitCode = 1;\n`,
+  );
+  fs.writeFileSync(
+    laterProducer,
+    `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(laterMarker)}, "ran");\n`,
+  );
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      commands: {
+        verify: {
+          projection: "verification-result",
+          reuse: "fingerprint",
+          tier: "authoritative",
+          steps: [
+            { name: "pass", argv: [process.execPath, passProducer], inputs: ["pass.txt"], tier: "focused" },
+            { name: "failure", argv: [process.execPath, failProducer], inputs: ["fail.txt"] },
+            { name: "after-failure", argv: [process.execPath, laterProducer], inputs: ["pass.txt"] },
+          ],
+        },
+      },
+    }),
+  );
+
+  const first = installedVerify(launcher, repositoryDirectory, configPath, 1, "first failing verify");
+  const firstSteps = assertVerificationSteps(
+    first,
+    "failed",
+    [
+      { name: "pass", execution: "executed" },
+      { name: "failure", execution: "executed" },
+    ],
+    "first failing verify",
+  );
+  assert.equal(first.stage, "failure");
+  assert.equal(firstSteps[0].evidence.tier, "focused");
+  assert.equal(firstSteps[1].evidence.tier, "authoritative");
+
+  const unchanged = installedVerify(launcher, repositoryDirectory, configPath, 1, "unchanged failing verify");
+  const unchangedSteps = assertVerificationSteps(
+    unchanged,
+    "failed",
+    [
+      { name: "pass", execution: "reused" },
+      { name: "failure", execution: "reused" },
+    ],
+    "unchanged failing verify",
+  );
+  assert.equal(unchanged.stage, "failure");
+  assert.equal(firstSteps[0].evidence.identity, unchangedSteps[0].evidence.identity);
+  assert.equal(firstSteps[1].evidence.identity, unchangedSteps[1].evidence.identity);
+  assert.equal(fs.readFileSync(passCounter, "utf8"), "x");
+  assert.equal(fs.readFileSync(failCounter, "utf8"), "x");
+  assert.equal(fs.existsSync(laterMarker), false, "a step after a cached failure must not run");
 }
 
 function main() {
@@ -254,6 +473,11 @@ function main() {
         if (verifyOutput.status !== "passed" || verifyOutput.completeness !== "complete") {
           fail(`installed verify returned an unexpected result: ${verifyResult.stdout}`);
         }
+
+        console.log(`certifying installed ${name} tiered verification reuse...`);
+        certifyInstalledVerificationReuse(launcher, profileDirectory);
+        console.log(`certifying installed ${name} reusable verification failure...`);
+        certifyInstalledFailureReuse(launcher, profileDirectory);
 
         const runProducer = path.join(profileDirectory, "run-producer.mjs");
         const runConfig = path.join(profileDirectory, "run-commands.json");
