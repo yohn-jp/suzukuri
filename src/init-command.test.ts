@@ -7,6 +7,8 @@ import { InitCommandError, runInitCommand } from "./init-command.js";
 import { isSteppedExecutionCommand, parseExecutionConfig } from "./execution.js";
 import { runRunCommand } from "./run-command.js";
 
+const packageVersion = (JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+
 function repository(prefix: string, packageJson: Record<string, unknown>): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify(packageJson, null, 2));
@@ -14,7 +16,7 @@ function repository(prefix: string, packageJson: Record<string, unknown>): strin
   fs.mkdirSync(localSuzukuri);
   fs.writeFileSync(
     path.join(localSuzukuri, "package.json"),
-    JSON.stringify({ name: "suzukuri", version: "0.0.0" }, null, 2),
+    JSON.stringify({ name: "suzukuri", version: packageVersion }, null, 2),
   );
   fs.writeFileSync(
     path.join(directory, "pnpm-workspace.yaml"),
