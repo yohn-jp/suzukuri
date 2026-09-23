@@ -127,6 +127,75 @@ test("an explicit projection/reuse declaration overrides the name-based default"
   );
 });
 
+test("explicit verification tiers survive normalized command and step metadata", () => {
+  const config = parseExecutionConfig({
+    schemaVersion: 1,
+    commands: {
+      test: { argv: ["pnpm", "test"], tier: "iteration" },
+      verify: {
+        tier: "authoritative",
+        steps: [
+          { name: "lint", argv: ["pnpm", "run", "lint"], tier: "focused" },
+          { name: "types", argv: ["pnpm", "run", "types"], tier: "iteration" },
+        ],
+      },
+    },
+  });
+  assert.equal(config.commands.test?.tier, "iteration");
+  const command = config.commands.verify;
+  assert.ok(command !== undefined && isSteppedExecutionCommand(command));
+  if (command !== undefined && isSteppedExecutionCommand(command)) {
+    assert.equal(command.tier, "authoritative");
+    assert.deepEqual(
+      command.steps.map((step) => step.tier),
+      ["focused", "iteration"],
+    );
+    assert.deepEqual(
+      parseExecutionConfig({ schemaVersion: 1, commands: { verify: command } }).commands.verify,
+      command,
+    );
+  }
+});
+
+test("verification tiers reject unknown values and remain absent when undeclared", () => {
+  assert.throws(
+    () => parseExecutionConfig({ schemaVersion: 1, commands: { test: { argv: ["node"], tier: "quick" } } }),
+    (error: unknown) =>
+      error instanceof ExecutionError &&
+      error.code === "EXECUTION_CONFIG_INVALID" &&
+      error.details.path === "$.commands.test.tier" &&
+      typeof error.details.reason === "string" &&
+      error.details.reason.includes("iteration, focused, authoritative"),
+  );
+  assert.throws(
+    () =>
+      parseExecutionConfig({
+        schemaVersion: 1,
+        commands: { verify: { steps: [{ name: "lint", argv: ["pnpm", "run", "lint"], tier: "eventual" }] } },
+      }),
+    (error: unknown) =>
+      error instanceof ExecutionError &&
+      error.code === "EXECUTION_CONFIG_INVALID" &&
+      error.details.path === "$.commands.verify.steps[0].tier",
+  );
+
+  const config = parseExecutionConfig({
+    schemaVersion: 1,
+    commands: { test: { argv: ["node"] }, verify: { steps: [{ name: "lint", argv: ["pnpm", "run", "lint"] }] } },
+  });
+  const single = config.commands.test;
+  const stepped = config.commands.verify;
+  assert.ok(single !== undefined && !isSteppedExecutionCommand(single));
+  assert.ok(stepped !== undefined && isSteppedExecutionCommand(stepped));
+  if (single !== undefined && !isSteppedExecutionCommand(single)) {
+    assert.equal(Object.hasOwn(single, "tier"), false);
+  }
+  if (stepped !== undefined && isSteppedExecutionCommand(stepped)) {
+    assert.equal(Object.hasOwn(stepped, "tier"), false);
+    assert.equal(Object.hasOwn(stepped.steps[0], "tier"), false);
+  }
+});
+
 test("an arbitrary repository-local command name is accepted; only diff rejects ordered steps", () => {
   const config = parseExecutionConfig({
     schemaVersion: 1,
