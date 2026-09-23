@@ -100,6 +100,41 @@ test("syntax failures are explicit and do not select generic-text", () => {
   );
 });
 
+test("TypeScript source admission rejects JavaScript kinds and conflicting media types", () => {
+  const unsupportedSources: ProjectionSource[] = [
+    ...["js", "jsx", "mjs", "cjs"].map((extension) => ({
+      identity: `fixtures/example.${extension}`,
+      mediaType: "text/typescript",
+      content: "export const value = 1;",
+    })),
+    {
+      identity: "fixtures/example.ts",
+      mediaType: "text/javascript",
+      content: "export const value = 1;",
+    },
+    {
+      identity: "fixtures/example.ts",
+      mediaType: "text/tsx",
+      content: "export const value = 1;",
+    },
+  ];
+
+  for (const source of unsupportedSources) {
+    const result = validateTypeScriptSource(source);
+    assert.equal(result.valid, false);
+    assert.ok(result.issues.some((issue) => issue.code === "UNSUPPORTED_TYPESCRIPT_SOURCE_KIND"));
+  }
+});
+
+test("TSX source identity continues to produce TSX semantics", () => {
+  const model = decodeTypeScriptSource({
+    identity: "fixtures/component.tsx",
+    mediaType: "text/typescript",
+    content: "export const Component = () => <div />;",
+  });
+  assert.equal(model.language, "tsx");
+});
+
 test("symbol index and selected symbol views use the shared budget/rendering core", () => {
   const core = createSourceProjectionCore();
   const indexResult = core.project({

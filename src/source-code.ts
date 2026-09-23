@@ -357,6 +357,11 @@ export class TypeScriptSourceSyntaxError extends Error {
 }
 
 function parseTypeScriptSource(source: ProjectionSource): ParseResult {
+  const admissionFailure = sourceKindAdmissionFailure(source);
+  if (admissionFailure !== undefined) {
+    return admissionFailure;
+  }
+
   let text: string;
   try {
     text = typeof source.content === "string" ? source.content : textDecoder.decode(source.content);
@@ -385,13 +390,37 @@ function parseTypeScriptSource(source: ProjectionSource): ParseResult {
   };
 }
 
+function sourceKindAdmissionFailure(source: ProjectionSource): ParseFailure | undefined {
+  const identity = source.identity?.trim() ?? "";
+  const normalizedIdentity = identity.toLowerCase();
+  const mediaType = source.mediaType?.trim().toLowerCase() ?? "";
+  const hasJavaScriptIdentity = /\.(?:js|jsx|mjs|cjs)$/.test(normalizedIdentity);
+  const hasJavaScriptMediaType =
+    mediaType.includes("javascript") || mediaType.includes("ecmascript") || /(?:^|[+/])jsx(?:$|[;+])/.test(mediaType);
+  const hasConflictingTsxMediaType = normalizedIdentity.endsWith(".ts") && isTsxMediaType(mediaType);
+
+  if (hasJavaScriptIdentity || hasJavaScriptMediaType || hasConflictingTsxMediaType) {
+    return {
+      issue: {
+        code: "UNSUPPORTED_TYPESCRIPT_SOURCE_KIND",
+        message: "The TypeScript source adapter accepts only TypeScript and TSX source kinds.",
+        path: "source",
+        details: {
+          identity: identity || "unknown",
+          mediaType: source.mediaType ?? "unknown",
+        },
+      },
+    };
+  }
+  return undefined;
+}
+
 function sourceFileName(source: ProjectionSource): string {
   const identity = source.identity?.trim();
   if (identity !== undefined && identity !== "") {
     return identity;
   }
-  const mediaType = source.mediaType?.toLowerCase() ?? "";
-  if (mediaType.includes("tsx") || mediaType.includes("react")) {
+  if (isTsxMediaType(source.mediaType)) {
     return "source.tsx";
   }
   return "source.ts";
@@ -399,17 +428,15 @@ function sourceFileName(source: ProjectionSource): string {
 
 function scriptKindForFileName(fileName: string, mediaType: string | undefined): ts.ScriptKind {
   const normalized = fileName.toLowerCase();
-  const normalizedMediaType = mediaType?.toLowerCase() ?? "";
-  if (normalized.endsWith(".tsx") || normalizedMediaType.includes("tsx") || normalizedMediaType.includes("react")) {
+  if (normalized.endsWith(".tsx") || isTsxMediaType(mediaType)) {
     return ts.ScriptKind.TSX;
   }
-  if (normalized.endsWith(".jsx")) {
-    return ts.ScriptKind.JSX;
-  }
-  if (normalized.endsWith(".js") || normalized.endsWith(".mjs") || normalized.endsWith(".cjs")) {
-    return ts.ScriptKind.JS;
-  }
   return ts.ScriptKind.TS;
+}
+
+function isTsxMediaType(mediaType: string | undefined): boolean {
+  const normalizedMediaType = mediaType?.toLowerCase() ?? "";
+  return normalizedMediaType.includes("tsx") || normalizedMediaType.includes("react");
 }
 
 function sourceDiagnostics(sourceFile: ts.SourceFile): readonly ts.Diagnostic[] {
