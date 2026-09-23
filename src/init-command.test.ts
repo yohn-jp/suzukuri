@@ -7,7 +7,9 @@ import { InitCommandError, runInitCommand } from "./init-command.js";
 import { isSteppedExecutionCommand, parseExecutionConfig } from "./execution.js";
 import { runRunCommand } from "./run-command.js";
 
-const packageVersion = (JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+const packageVersion = (
+  JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
+).version;
 
 function repository(prefix: string, packageJson: Record<string, unknown>): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -20,7 +22,7 @@ function repository(prefix: string, packageJson: Record<string, unknown>): strin
   );
   fs.writeFileSync(
     path.join(directory, "pnpm-workspace.yaml"),
-    "overrides:\n  suzukuri: file:./.suzukuri-test-package\n",
+    `overrides:\n  "suzukuri@^${packageVersion}": file:./.suzukuri-test-package\n`,
   );
   fs.writeFileSync(path.join(directory, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
   return directory;
