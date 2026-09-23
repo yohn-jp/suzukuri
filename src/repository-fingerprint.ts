@@ -41,8 +41,30 @@ export class RepositoryFingerprintError extends Error {
  * exact file bytes, independent of worktree path, branch, commit, index
  * state, and mtime.
  */
-export async function computeRepositoryFingerprint(cwd = process.cwd()): Promise<string> {
-  const paths = await listFingerprintedPaths(cwd);
+export async function computeRepositoryFingerprint(cwd = process.cwd(), inputs?: readonly string[]): Promise<string> {
+  if (
+    inputs !== undefined &&
+    (inputs.length === 0 ||
+      inputs.some(
+        (input) =>
+          typeof input !== "string" ||
+          input === "" ||
+          input.startsWith("/") ||
+          input.includes("\\") ||
+          input.includes("\0") ||
+          input.split("/").some((part) => part === "" || part === "." || part === "..") ||
+          input === ".git" ||
+          input.startsWith(".git/") ||
+          input === ".suzukuri/cache" ||
+          input.startsWith(".suzukuri/cache/"),
+      ))
+  ) {
+    throw new RepositoryFingerprintError("REPOSITORY_FINGERPRINT_UNAVAILABLE", { reason: "invalid input scope" });
+  }
+  const paths = (await listFingerprintedPaths(cwd)).filter(
+    (relativePath) =>
+      inputs === undefined || inputs.some((input) => relativePath === input || relativePath.startsWith(`${input}/`)),
+  );
   const hash = createHash(REPOSITORY_FINGERPRINT_ALGORITHM);
   for (const relativePath of paths) {
     const entry = readEntry(cwd, relativePath);

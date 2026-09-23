@@ -27,6 +27,27 @@ test("execution config accepts exact argv arrays and rejects shell strings", () 
   );
 });
 
+test("execution config accepts canonical command and step input scopes", () => {
+  const config = parseExecutionConfig({
+    schemaVersion: 1,
+    commands: {
+      test: { argv: ["node"], inputs: ["src/b", "src/a"] },
+      verify: { inputs: ["config"], steps: [{ name: "test", argv: ["node"], inputs: ["src"] }] },
+    },
+  });
+  assert.deepEqual(config.commands.test?.inputs, ["src/a", "src/b"]);
+  const verify = config.commands.verify;
+  assert.ok(verify && isSteppedExecutionCommand(verify));
+  assert.deepEqual(verify.inputs, ["config"]);
+  assert.deepEqual(verify.steps[0]?.inputs, ["src"]);
+  for (const inputs of [[], ["../src"], ["/src"], ["src//x"], ["src", "src"], [".git/config"], [".suzukuri/cache/x"]]) {
+    assert.throws(
+      () => parseExecutionConfig({ schemaVersion: 1, commands: { test: { argv: ["node"], inputs } } }),
+      (error: unknown) => error instanceof ExecutionError && error.code === "EXECUTION_CONFIG_INVALID",
+    );
+  }
+});
+
 test("execution config accepts ordered named steps and rejects duplicate or missing step names", () => {
   const config = parseExecutionConfig({
     schemaVersion: 1,

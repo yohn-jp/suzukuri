@@ -51,6 +51,42 @@ test("a lookup miss followed by a commit is served as a hit for identical conten
   }
 });
 
+test("cache lookup and commit use declared command and step inputs", async () => {
+  const directory = initRepository("suzukuri-cache-scope-");
+  try {
+    fs.writeFileSync(path.join(directory, "outside.txt"), "one");
+    const command = {
+      argv: ["node"] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+      inputs: ["a.txt"],
+    };
+    const first = await lookupExecutionCache("test", command, { cwd: directory });
+    assert.ok(first);
+    fs.writeFileSync(path.join(directory, "outside.txt"), "two");
+    await first.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
+    assert.ok((await lookupExecutionCache("test", command, { cwd: directory }))?.cached);
+    fs.writeFileSync(path.join(directory, "a.txt"), "changed");
+    assert.equal((await lookupExecutionCache("test", command, { cwd: directory }))?.cached, undefined);
+
+    const stepped = {
+      steps: [
+        { name: "one", argv: ["node"] as const, inputs: ["a.txt"] },
+        { name: "two", argv: ["node"] as const, inputs: ["outside.txt"] },
+      ] as const,
+      projection: "generic" as const,
+      reuse: "fingerprint" as const,
+    };
+    const stepFirst = await lookupExecutionCache("verify", stepped, { cwd: directory });
+    assert.ok(stepFirst);
+    await stepFirst.commit({ exitCode: 0, signal: null, printed: { status: "passed" } });
+    fs.writeFileSync(path.join(directory, "outside.txt"), "three");
+    assert.equal((await lookupExecutionCache("verify", stepped, { cwd: directory }))?.cached, undefined);
+  } finally {
+    cleanup(directory);
+  }
+});
+
 test("a one-byte included change invalidates the cached entry", async () => {
   const directory = initRepository("suzukuri-cache-invalidate-");
   try {

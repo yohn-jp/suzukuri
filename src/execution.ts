@@ -36,6 +36,7 @@ export type ExecutionReuseMode = "fingerprint" | "never";
 
 export interface ExecutionCommandStep {
   readonly name: string;
+  readonly inputs?: readonly string[];
   readonly argv: readonly [string, ...string[]];
   readonly adapter?: string;
   readonly view?: string;
@@ -43,6 +44,7 @@ export interface ExecutionCommandStep {
 }
 
 export interface SingleExecutionCommand {
+  readonly inputs?: readonly string[];
   readonly argv: readonly [string, ...string[]];
   readonly adapter?: string;
   readonly view?: string;
@@ -53,6 +55,7 @@ export interface SingleExecutionCommand {
 
 export interface SteppedExecutionCommand {
   readonly steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]];
+  readonly inputs?: readonly string[];
   readonly projection: ExecutionProjectionKind;
   readonly reuse: ExecutionReuseMode;
 }
@@ -139,7 +142,7 @@ function normalizeCommand(value: unknown, commandName: string): ExecutionCommand
   const projection = readProjection(value, issuePath, commandName);
   const reuse = readReuse(value, issuePath, projection);
   if (isRecord(value) && value.steps !== undefined) {
-    for (const key of unknownKeys(value, ["steps", "projection", "reuse"])) {
+    for (const key of unknownKeys(value, ["steps", "projection", "reuse", "inputs"])) {
       throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
     }
     if (!Array.isArray(value.steps) || value.steps.length === 0) {
@@ -163,11 +166,18 @@ function normalizeCommand(value: unknown, commandName: string): ExecutionCommand
         "adapter",
         "view",
         "budget",
+        "inputs",
       ]);
       const stepDefinition: ExecutionCommandStep = { name: step.name, ...normalized };
       return stepDefinition;
     });
-    return { steps: steps as [ExecutionCommandStep, ...ExecutionCommandStep[]], projection, reuse };
+    const inputs = readInputs(value.inputs, `${issuePath}.inputs`);
+    return {
+      steps: steps as [ExecutionCommandStep, ...ExecutionCommandStep[]],
+      projection,
+      reuse,
+      ...(inputs === undefined ? {} : { inputs }),
+    };
   }
   const single = normalizeSingleCommand(value, issuePath, [
     "argv",
@@ -177,6 +187,7 @@ function normalizeCommand(value: unknown, commandName: string): ExecutionCommand
     "budget",
     "projection",
     "reuse",
+    "inputs",
   ]);
   return { ...single, projection, reuse };
 }
@@ -200,6 +211,7 @@ function readReuse(value: unknown, issuePath: string, projection: ExecutionProje
 }
 
 interface ArgvBearingCommand {
+  readonly inputs?: readonly string[];
   readonly argv: readonly [string, ...string[]];
   readonly adapter?: string;
   readonly view?: string;
@@ -211,6 +223,7 @@ function normalizeSingleCommand(value: unknown, issuePath: string, allowedKeys: 
   let adapter: string | undefined;
   let view: string | undefined;
   let budget: number | undefined;
+  let inputs: readonly string[] | undefined;
   if (isRecord(value)) {
     for (const key of unknownKeys(value, allowedKeys)) {
       throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
@@ -219,6 +232,7 @@ function normalizeSingleCommand(value: unknown, issuePath: string, allowedKeys: 
     if (value.adapter !== undefined) adapter = value.adapter as string;
     if (value.view !== undefined) view = value.view as string;
     if (value.budget !== undefined) budget = value.budget as number;
+    if (value.inputs !== undefined) inputs = readInputs(value.inputs, `${issuePath}.inputs`);
   }
   if (!Array.isArray(argvValue) || argvValue.length === 0 || !argvValue.every((item) => typeof item === "string")) {
     throw configIssue(`${issuePath}.argv`, "Command argv must be a non-empty array of strings.");
@@ -241,7 +255,37 @@ function normalizeSingleCommand(value: unknown, issuePath: string, allowedKeys: 
     ...(adapter === undefined ? {} : { adapter }),
     ...(view === undefined ? {} : { view }),
     ...(budget === undefined ? {} : { budget }),
+    ...(inputs === undefined ? {} : { inputs }),
   };
+}
+
+function readInputs(value: unknown, issuePath: string): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string")) {
+    throw configIssue(issuePath, "Inputs must be a non-empty array of repository-relative paths.");
+  }
+  const inputs = value as string[];
+  if (
+    inputs.some(
+      (item) =>
+        item === "" ||
+        item.startsWith("/") ||
+        item.includes("\\") ||
+        item.includes("\0") ||
+        item.split("/").some((part) => part === "" || part === "." || part === "..") ||
+        item === ".git" ||
+        item.startsWith(".git/") ||
+        item === ".suzukuri/cache" ||
+        item.startsWith(".suzukuri/cache/"),
+    ) ||
+    new Set(inputs).size !== inputs.length
+  ) {
+    throw configIssue(
+      issuePath,
+      "Inputs must be unique canonical repository-relative paths outside Git and Suzukuri cache state.",
+    );
+  }
+  return [...inputs].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
 }
 
 export function parseExecutionConfig(input: unknown): ExecutionConfig {
