@@ -3,13 +3,30 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { InitCommandError, runInitCommand } from "./init-command.js";
+import { InitCommandError, runInitCommand as runInitCommandImplementation } from "./init-command.js";
 import { isSteppedExecutionCommand, parseExecutionConfig } from "./execution.js";
 import { runRunCommand } from "./run-command.js";
 
 const packageVersion = (
   JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
 ).version;
+
+async function runInitCommand(
+  args: Parameters<typeof runInitCommandImplementation>[0],
+  dependencies: Parameters<typeof runInitCommandImplementation>[1],
+) {
+  const testBin = dependencies?.cwd ? path.join(dependencies.cwd, ".suzukuri-test-bin") : undefined;
+  if (testBin === undefined || !fs.existsSync(testBin)) return runInitCommandImplementation(args, dependencies);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${testBin}${path.delimiter}${originalPath ?? ""}`;
+  try {
+    return await runInitCommandImplementation(args, dependencies);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  }
+}
 
 function repository(prefix: string, packageJson: Record<string, unknown>): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -25,6 +42,32 @@ function repository(prefix: string, packageJson: Record<string, unknown>): strin
     `overrides:\n  "suzukuri@^${packageVersion}": file:./.suzukuri-test-package\n`,
   );
   fs.writeFileSync(path.join(directory, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+
+  const testBin = path.join(directory, ".suzukuri-test-bin");
+  fs.mkdirSync(testBin);
+  const fakePnpm = path.join(testBin, "pnpm");
+  fs.writeFileSync(
+    fakePnpm,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (args[0] !== "add" || !args.includes("--save-dev") || !args.includes("--lockfile-only")) process.exit(2);
+const localPackage = JSON.parse(
+  fs.readFileSync(path.join(process.cwd(), ".suzukuri-test-package", "package.json"), "utf8")
+);
+if (localPackage.name !== "suzukuri" || args.at(-1) !== "suzukuri@^" + localPackage.version) process.exit(2);
+fs.appendFileSync(
+  path.join(process.cwd(), "pnpm-lock.yaml"),
+  "# local fixture: " + localPackage.name + "@" + localPackage.version + "\\n"
+);
+fs.appendFileSync(
+  path.join(process.cwd(), "pnpm-workspace.yaml"),
+  "# simulated package-manager mutation\\n"
+);
+`,
+  );
+  fs.chmodSync(fakePnpm, 0o755);
   return directory;
 }
 
@@ -362,7 +405,7 @@ test("--yes bypasses the confirmation prompt entirely", async () => {
   }
 });
 
-test("init updates the lockfile so devDependencies.suzukuri is reflected without a frozen-lockfile install failing", async () => {
+test("init records the local package-manager lockfile update without registry access", async () => {
   const directory = repository("suzukuri-init-lockfile-", {
     name: "wabachi",
     scripts: { build: "tsc" },
@@ -386,8 +429,7 @@ test("init restores package and lockfile state when the targeted dependency upda
     name: "wabachi",
     scripts: { build: "tsc" },
   });
-  const fakeBin = path.join(directory, "fake-bin");
-  fs.mkdirSync(fakeBin);
+  const fakeBin = path.join(directory, ".suzukuri-test-bin");
   fs.writeFileSync(path.join(fakeBin, "pnpm"), "#!/usr/bin/env node\nprocess.exit(1);\n");
   fs.chmodSync(path.join(fakeBin, "pnpm"), 0o755);
   const originalPath = process.env.PATH;
