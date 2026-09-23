@@ -432,18 +432,12 @@ function sourceKindForIdentity(identity: string): TypeScriptSourceLanguage | "un
 }
 
 function sourceKindForMediaType(mediaType: string): TypeScriptSourceLanguage | undefined {
-  if (
-    mediaType.includes("javascript") ||
-    mediaType.includes("ecmascript") ||
-    /(?:^|[+/])(?:js|jsx|mjs|cjs)(?:$|[;+])/.test(mediaType)
-  ) {
-    return undefined;
-  }
-  if (isTsxMediaType(mediaType)) {
-    return "tsx";
-  }
-  if (mediaType.includes("typescript")) {
+  const normalized = mediaType.split(";", 1)[0].trim().toLowerCase();
+  if (normalized === "text/typescript") {
     return "typescript";
+  }
+  if (normalized === "text/tsx") {
+    return "tsx";
   }
   return undefined;
 }
@@ -468,8 +462,7 @@ function scriptKindForFileName(fileName: string, mediaType: string | undefined):
 }
 
 function isTsxMediaType(mediaType: string | undefined): boolean {
-  const normalizedMediaType = mediaType?.toLowerCase() ?? "";
-  return normalizedMediaType.includes("tsx") || normalizedMediaType.includes("react");
+  return mediaType !== undefined && sourceKindForMediaType(mediaType) === "tsx";
 }
 
 function sourceDiagnostics(sourceFile: ts.SourceFile): readonly ts.Diagnostic[] {

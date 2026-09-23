@@ -122,6 +122,16 @@ test("TypeScript source admission rejects JavaScript kinds and conflicting media
       mediaType: "application/json",
       content: "export const value = 1;",
     },
+    {
+      identity: "fixtures/example.ts",
+      mediaType: "text/nottypescript",
+      content: "export const value = 1;",
+    },
+    {
+      identity: "fixtures/example.tsx",
+      mediaType: "application/reactor",
+      content: "export const value = 1;",
+    },
   ];
 
   for (const source of unsupportedSources) {
