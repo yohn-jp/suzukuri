@@ -50,6 +50,35 @@ test("a one-byte content change invalidates the fingerprint", async () => {
   }
 });
 
+test("scoped fingerprint tracks selected paths and ignores unrelated and ignored content", async () => {
+  const directory = initRepository("suzukuri-fingerprint-scope-");
+  try {
+    fs.mkdirSync(path.join(directory, "src"));
+    fs.writeFileSync(path.join(directory, ".gitignore"), "src/ignored.txt\n");
+    fs.writeFileSync(path.join(directory, "src/a.txt"), "alpha");
+    fs.writeFileSync(path.join(directory, "other.txt"), "outside");
+    execFileSync("git", ["add", ".gitignore", "src/a.txt", "other.txt"], { cwd: directory });
+    const scope = ["src"];
+    const initial = await computeRepositoryFingerprint(directory, scope);
+    fs.writeFileSync(path.join(directory, "other.txt"), "changed");
+    fs.writeFileSync(path.join(directory, "src/ignored.txt"), "ignored");
+    assert.equal(await computeRepositoryFingerprint(directory, scope), initial);
+    fs.writeFileSync(path.join(directory, "src/b.txt"), "untracked");
+    const added = await computeRepositoryFingerprint(directory, scope);
+    assert.notEqual(added, initial);
+    fs.renameSync(path.join(directory, "src/b.txt"), path.join(directory, "src/c.txt"));
+    assert.notEqual(await computeRepositoryFingerprint(directory, scope), added);
+    fs.rmSync(path.join(directory, "src/c.txt"));
+    fs.writeFileSync(path.join(directory, "src/a.txt"), "changed");
+    assert.notEqual(await computeRepositoryFingerprint(directory, scope), initial);
+    fs.rmSync(path.join(directory, "src/a.txt"));
+    execFileSync("git", ["add", "-u", "src/a.txt"], { cwd: directory });
+    assert.notEqual(await computeRepositoryFingerprint(directory, scope), initial);
+  } finally {
+    cleanup(directory);
+  }
+});
+
 test("adding, deleting, or renaming an included file invalidates the fingerprint", async () => {
   const directory = initRepository("suzukuri-fingerprint-structure-");
   try {
@@ -109,6 +138,11 @@ test("identical content in two distinct worktree directories produces the same f
     const fingerprintFirst = await computeRepositoryFingerprint(first);
     const fingerprintSecond = await computeRepositoryFingerprint(second);
     assert.equal(fingerprintFirst, fingerprintSecond);
+    fs.writeFileSync(path.join(second, "outside.txt"), "different outside scope");
+    assert.equal(
+      await computeRepositoryFingerprint(first, ["nested"]),
+      await computeRepositoryFingerprint(second, ["nested"]),
+    );
   } finally {
     cleanup(first);
     cleanup(second);

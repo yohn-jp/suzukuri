@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { stableJsonStringify } from "./core.js";
-import type { ExecutionCommand, ExecutionCommandName } from "./execution.js";
+import { isSteppedExecutionCommand, type ExecutionCommand, type ExecutionCommandName } from "./execution.js";
 import { computeRepositoryFingerprint, RepositoryFingerprintError } from "./repository-fingerprint.js";
 
 export const EXECUTION_CACHE_SCHEMA_VERSION = 1 as const;
@@ -184,9 +184,14 @@ export async function lookupExecutionCache(
   options: ExecutionCacheOptions = {},
 ): Promise<ExecutionCacheLookup | undefined> {
   if (command.reuse === "never") return undefined;
+  const inputs = isSteppedExecutionCommand(command)
+    ? command.inputs === undefined && command.steps.some((step) => step.inputs === undefined)
+      ? undefined
+      : [...new Set([...(command.inputs ?? []), ...command.steps.flatMap((step) => step.inputs ?? [])])]
+    : command.inputs;
   let fingerprint: string;
   try {
-    fingerprint = await computeRepositoryFingerprint(options.cwd);
+    fingerprint = await computeRepositoryFingerprint(options.cwd, inputs);
   } catch (error) {
     if (error instanceof RepositoryFingerprintError) return undefined;
     throw error;
@@ -200,7 +205,7 @@ export async function lookupExecutionCache(
     commit: async (outcome) => {
       let postFingerprint: string;
       try {
-        postFingerprint = await computeRepositoryFingerprint(options.cwd);
+        postFingerprint = await computeRepositoryFingerprint(options.cwd, inputs);
       } catch {
         return;
       }
