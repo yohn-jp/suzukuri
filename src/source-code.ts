@@ -357,6 +357,11 @@ export class TypeScriptSourceSyntaxError extends Error {
 }
 
 function parseTypeScriptSource(source: ProjectionSource): ParseResult {
+  const admissionFailure = sourceKindAdmissionFailure(source);
+  if (admissionFailure !== undefined) {
+    return admissionFailure;
+  }
+
   let text: string;
   try {
     text = typeof source.content === "string" ? source.content : textDecoder.decode(source.content);
@@ -385,13 +390,64 @@ function parseTypeScriptSource(source: ProjectionSource): ParseResult {
   };
 }
 
+function sourceKindAdmissionFailure(source: ProjectionSource): ParseFailure | undefined {
+  const identity = source.identity?.trim() ?? "";
+  const mediaType = source.mediaType?.trim().toLowerCase() ?? "";
+  const identityKind = identity === "" ? undefined : sourceKindForIdentity(identity);
+  const mediaTypeKind = mediaType === "" ? undefined : sourceKindForMediaType(mediaType);
+  const hasUnsupportedIdentity = identityKind === "unsupported";
+  const hasUnsupportedMediaType = mediaType !== "" && mediaTypeKind === undefined;
+  const hasConflictingTsxMediaType = identityKind === "typescript" && mediaTypeKind === "tsx";
+
+  if (hasUnsupportedIdentity || hasUnsupportedMediaType || hasConflictingTsxMediaType) {
+    return {
+      issue: {
+        code: "UNSUPPORTED_TYPESCRIPT_SOURCE_KIND",
+        message: "The TypeScript source adapter accepts only TypeScript and TSX source kinds.",
+        path: "source",
+        details: {
+          identity: identity || "unknown",
+          mediaType: source.mediaType ?? "unknown",
+        },
+      },
+    };
+  }
+  return undefined;
+}
+
+function sourceKindForIdentity(identity: string): TypeScriptSourceLanguage | "unsupported" | undefined {
+  const normalized = identity.toLowerCase();
+  if (normalized.endsWith(".tsx")) {
+    return "tsx";
+  }
+  if (normalized.endsWith(".ts")) {
+    return "typescript";
+  }
+  const lastSeparator = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  const lastDot = normalized.lastIndexOf(".");
+  if (lastDot > lastSeparator && lastDot < normalized.length - 1) {
+    return "unsupported";
+  }
+  return undefined;
+}
+
+function sourceKindForMediaType(mediaType: string): TypeScriptSourceLanguage | undefined {
+  const normalized = mediaType.split(";", 1)[0].trim().toLowerCase();
+  if (normalized === "text/typescript") {
+    return "typescript";
+  }
+  if (normalized === "text/tsx") {
+    return "tsx";
+  }
+  return undefined;
+}
+
 function sourceFileName(source: ProjectionSource): string {
   const identity = source.identity?.trim();
   if (identity !== undefined && identity !== "") {
     return identity;
   }
-  const mediaType = source.mediaType?.toLowerCase() ?? "";
-  if (mediaType.includes("tsx") || mediaType.includes("react")) {
+  if (isTsxMediaType(source.mediaType)) {
     return "source.tsx";
   }
   return "source.ts";
@@ -399,17 +455,14 @@ function sourceFileName(source: ProjectionSource): string {
 
 function scriptKindForFileName(fileName: string, mediaType: string | undefined): ts.ScriptKind {
   const normalized = fileName.toLowerCase();
-  const normalizedMediaType = mediaType?.toLowerCase() ?? "";
-  if (normalized.endsWith(".tsx") || normalizedMediaType.includes("tsx") || normalizedMediaType.includes("react")) {
+  if (normalized.endsWith(".tsx") || isTsxMediaType(mediaType)) {
     return ts.ScriptKind.TSX;
   }
-  if (normalized.endsWith(".jsx")) {
-    return ts.ScriptKind.JSX;
-  }
-  if (normalized.endsWith(".js") || normalized.endsWith(".mjs") || normalized.endsWith(".cjs")) {
-    return ts.ScriptKind.JS;
-  }
   return ts.ScriptKind.TS;
+}
+
+function isTsxMediaType(mediaType: string | undefined): boolean {
+  return mediaType !== undefined && sourceKindForMediaType(mediaType) === "tsx";
 }
 
 function sourceDiagnostics(sourceFile: ts.SourceFile): readonly ts.Diagnostic[] {
