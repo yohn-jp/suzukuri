@@ -34,9 +34,13 @@ export type ExecutionProjectionKind = "generic" | "test-result" | "verification-
  */
 export type ExecutionReuseMode = "fingerprint" | "never";
 
+/** Explicit repository-declared verification classification for a command or step. */
+export type ExecutionVerificationTier = "iteration" | "focused" | "authoritative";
+
 export interface ExecutionCommandStep {
   readonly name: string;
   readonly argv: readonly [string, ...string[]];
+  readonly tier?: ExecutionVerificationTier;
   readonly adapter?: string;
   readonly view?: string;
   readonly budget?: number;
@@ -44,6 +48,7 @@ export interface ExecutionCommandStep {
 
 export interface SingleExecutionCommand {
   readonly argv: readonly [string, ...string[]];
+  readonly tier?: ExecutionVerificationTier;
   readonly adapter?: string;
   readonly view?: string;
   readonly budget?: number;
@@ -53,6 +58,7 @@ export interface SingleExecutionCommand {
 
 export interface SteppedExecutionCommand {
   readonly steps: readonly [ExecutionCommandStep, ...ExecutionCommandStep[]];
+  readonly tier?: ExecutionVerificationTier;
   readonly projection: ExecutionProjectionKind;
   readonly reuse: ExecutionReuseMode;
 }
@@ -121,6 +127,7 @@ function configIssue(pathName: string, message: string): ExecutionError {
 }
 
 const PROJECTION_KINDS: readonly ExecutionProjectionKind[] = ["generic", "test-result", "verification-result"];
+const VERIFICATION_TIERS: readonly ExecutionVerificationTier[] = ["iteration", "focused", "authoritative"];
 
 /** A command's default reuse mode when not explicitly declared: conservative unless its projection is a known read-only verification shape. */
 function defaultReuseMode(projection: ExecutionProjectionKind): ExecutionReuseMode {
@@ -138,8 +145,9 @@ function normalizeCommand(value: unknown, commandName: string): ExecutionCommand
   const issuePath = `$.commands.${commandName}`;
   const projection = readProjection(value, issuePath, commandName);
   const reuse = readReuse(value, issuePath, projection);
+  const tier = readTier(value, issuePath);
   if (isRecord(value) && value.steps !== undefined) {
-    for (const key of unknownKeys(value, ["steps", "projection", "reuse"])) {
+    for (const key of unknownKeys(value, ["steps", "projection", "reuse", "tier"])) {
       throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
     }
     if (!Array.isArray(value.steps) || value.steps.length === 0) {
@@ -163,11 +171,17 @@ function normalizeCommand(value: unknown, commandName: string): ExecutionCommand
         "adapter",
         "view",
         "budget",
+        "tier",
       ]);
       const stepDefinition: ExecutionCommandStep = { name: step.name, ...normalized };
       return stepDefinition;
     });
-    return { steps: steps as [ExecutionCommandStep, ...ExecutionCommandStep[]], projection, reuse };
+    return {
+      steps: steps as [ExecutionCommandStep, ...ExecutionCommandStep[]],
+      ...(tier === undefined ? {} : { tier }),
+      projection,
+      reuse,
+    };
   }
   const single = normalizeSingleCommand(value, issuePath, [
     "argv",
@@ -175,6 +189,7 @@ function normalizeCommand(value: unknown, commandName: string): ExecutionCommand
     "adapter",
     "view",
     "budget",
+    "tier",
     "projection",
     "reuse",
   ]);
@@ -199,8 +214,18 @@ function readReuse(value: unknown, issuePath: string, projection: ExecutionProje
   return raw;
 }
 
+function readTier(value: unknown, issuePath: string): ExecutionVerificationTier | undefined {
+  if (!isRecord(value) || value.tier === undefined) return undefined;
+  const raw = value.tier;
+  if (typeof raw !== "string" || !VERIFICATION_TIERS.includes(raw as ExecutionVerificationTier)) {
+    throw configIssue(`${issuePath}.tier`, `Command tier must be one of ${VERIFICATION_TIERS.join(", ")}.`);
+  }
+  return raw as ExecutionVerificationTier;
+}
+
 interface ArgvBearingCommand {
   readonly argv: readonly [string, ...string[]];
+  readonly tier?: ExecutionVerificationTier;
   readonly adapter?: string;
   readonly view?: string;
   readonly budget?: number;
@@ -211,6 +236,7 @@ function normalizeSingleCommand(value: unknown, issuePath: string, allowedKeys: 
   let adapter: string | undefined;
   let view: string | undefined;
   let budget: number | undefined;
+  let tier: ExecutionVerificationTier | undefined;
   if (isRecord(value)) {
     for (const key of unknownKeys(value, allowedKeys)) {
       throw configIssue(`${issuePath}.${key}`, `Unknown command property "${key}".`);
@@ -219,6 +245,7 @@ function normalizeSingleCommand(value: unknown, issuePath: string, allowedKeys: 
     if (value.adapter !== undefined) adapter = value.adapter as string;
     if (value.view !== undefined) view = value.view as string;
     if (value.budget !== undefined) budget = value.budget as number;
+    tier = readTier(value, issuePath);
   }
   if (!Array.isArray(argvValue) || argvValue.length === 0 || !argvValue.every((item) => typeof item === "string")) {
     throw configIssue(`${issuePath}.argv`, "Command argv must be a non-empty array of strings.");
@@ -238,6 +265,7 @@ function normalizeSingleCommand(value: unknown, issuePath: string, allowedKeys: 
   }
   return {
     argv: argv as [string, ...string[]],
+    ...(tier === undefined ? {} : { tier }),
     ...(adapter === undefined ? {} : { adapter }),
     ...(view === undefined ? {} : { view }),
     ...(budget === undefined ? {} : { budget }),
