@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   AdapterRegistry,
@@ -205,8 +206,9 @@ test("validation and decode failures use stable error codes", () => {
 
 test("result carries provenance, source metadata, bounded output, and stable digest", () => {
   const core = makeCore();
+  const hash = createHash("sha256").update(Buffer.from(" hello ", "utf8")).digest("hex");
   const request = {
-    source: { content: " hello ", identity: "fixture-1", hash: "sha256:abc", mediaType: "text/plain" },
+    source: { content: " hello ", identity: "fixture-1", hash, mediaType: "text/plain" },
     adapter: "text",
     view: "text-view",
     budget: createBudget(100),
@@ -220,13 +222,66 @@ test("result carries provenance, source metadata, bounded output, and stable dig
   assert.equal(first.outputSize, new TextEncoder().encode(String(first.output)).byteLength);
   assert.deepEqual(first.source, {
     identity: "fixture-1",
-    hash: "sha256:abc",
+    hash,
     mediaType: "text/plain",
   });
   assert.equal(first.provenance.adapter.id, "text");
   assert.equal(first.provenance.semanticContract.version, "1.0.0");
   assert.equal(first.projectionDigest, second.projectionDigest);
   assert.equal(first.loss.state, "none");
+});
+
+test("source provenance hashes exact UTF-8 bytes for strings and Uint8Arrays", () => {
+  const core = makeCore();
+  const content = " source bytes 日本語 ";
+  const bytes = new TextEncoder().encode(content);
+  const hash = createHash("sha256").update(Buffer.from(content, "utf8")).digest("hex");
+  const request = {
+    adapter: "text",
+    view: "text-view",
+    budget: createBudget(100),
+    renderer: "json",
+  } as const;
+
+  const stringResult = core.project({ ...request, source: content });
+  const bytesResult = core.project({
+    ...request,
+    source: { content: bytes, identity: "fixture-2", mediaType: "text/plain" },
+  });
+
+  assert.deepEqual(stringResult.source, { hash });
+  assert.equal(bytesResult.source?.hash, hash);
+  assert.equal(stringResult.provenance.source?.hash, bytesResult.provenance.source?.hash);
+});
+
+test("a caller-supplied source hash must match exact content bytes", () => {
+  const core = makeCore();
+  const request = {
+    source: { content: "hello", hash: "forged" },
+    adapter: "text",
+    view: "text-view",
+    budget: createBudget(100),
+    renderer: "json",
+  } satisfies ProjectionRequest;
+  const errors: SuzukuriError[] = [];
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.throws(
+      () => core.project(request),
+      (error: unknown) => {
+        assert(error instanceof SuzukuriError);
+        errors.push(error);
+        return error.code === "SOURCE_INVALID";
+      },
+    );
+  }
+
+  assert.deepEqual(errors[0].details, {
+    field: "source.hash",
+    expected: createHash("sha256").update(Buffer.from("hello", "utf8")).digest("hex"),
+    actual: "forged",
+  });
+  assert.deepEqual(errors[1].details, errors[0].details);
 });
 
 test("a rendered projection over the hard budget fails explicitly", () => {

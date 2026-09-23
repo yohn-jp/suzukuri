@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { runCli } from "./cli.js";
 
 const profileFixture = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.suzukuri/profiles.json");
+const cliSourceLimit = 10 * 1024 * 1024;
 
 test("--help exits 0 and prints usage", async () => {
   const originalLog = console.log;
@@ -247,6 +248,144 @@ test("skill <unknown scenario> exits 1 with a stable error code", async () => {
     assert.match(errors.join("\n"), /SKILL_SCENARIO_NOT_FOUND/);
   } finally {
     console.log = originalLog;
+    console.error = originalError;
+  }
+});
+
+test("negative budget values reach the same structured numeric validation in either syntax", async () => {
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (message: string) => errors.push(message);
+  try {
+    const common = [
+      "project",
+      "--adapter",
+      "profile-text",
+      "--view",
+      "profile-text",
+      "--renderer",
+      "json",
+      "--input",
+      "-",
+    ];
+    assert.equal(await runCli([...common.slice(0, 5), "--budget", "-5", ...common.slice(5)]), 1);
+    assert.equal(await runCli([...common.slice(0, 5), "--budget=-5", ...common.slice(5)]), 1);
+    const separated = JSON.parse(errors[0] ?? "{}") as { code?: string; message?: string; details?: unknown };
+    const equals = JSON.parse(errors[1] ?? "{}") as { code?: string; message?: string; details?: unknown };
+    assert.equal(separated.code, "INVALID_ARGUMENTS");
+    assert.deepEqual(separated, equals);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("unknown options fail inside the structured CLI error boundary without a stack", async () => {
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (message: string) => errors.push(message);
+  try {
+    assert.equal(await runCli(["project", "--unknown-option"]), 1);
+    const diagnostic = JSON.parse(errors[0] ?? "{}") as {
+      code?: string;
+      details?: { option?: string };
+    };
+    assert.equal(diagnostic.code, "INVALID_ARGUMENTS");
+    assert.equal(diagnostic.details?.option, "unknown-option");
+    assert.doesNotMatch(errors.join("\n"), /\n\s+at /);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("oversized regular sources fail from file metadata before reading source bytes", async () => {
+  const originalError = console.error;
+  const originalReadSync = fs.readSync;
+  const errors: string[] = [];
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-cli-oversized-file-"));
+  const inputPath = path.join(tempDirectory, "input.bin");
+  fs.writeFileSync(inputPath, "");
+  fs.truncateSync(inputPath, cliSourceLimit + 1);
+  let reads = 0;
+  console.error = (message: string) => errors.push(message);
+  fs.readSync = ((..._args: unknown[]) => {
+    reads += 1;
+    throw new Error("source bytes were read before checking the file size");
+  }) as typeof fs.readSync;
+  try {
+    assert.equal(
+      await runCli([
+        "project",
+        "--adapter",
+        "profile-text",
+        "--view",
+        "profile-text",
+        "--budget",
+        "1024",
+        "--renderer",
+        "json",
+        "--input",
+        inputPath,
+      ]),
+      1,
+    );
+    const diagnostic = JSON.parse(errors[0] ?? "{}") as {
+      code?: string;
+      details?: { limitBytes?: number; sizeBytes?: number };
+    };
+    assert.equal(diagnostic.code, "INVALID_ARGUMENTS");
+    assert.equal(diagnostic.details?.limitBytes, cliSourceLimit);
+    assert.equal(diagnostic.details?.sizeBytes, cliSourceLimit + 1);
+    assert.equal(reads, 0);
+  } finally {
+    fs.readSync = originalReadSync;
+    console.error = originalError;
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
+  }
+});
+
+test("oversized stdin is rejected after incrementally observing only one byte beyond the limit", async () => {
+  const originalError = console.error;
+  const originalReadSync = fs.readSync;
+  const errors: string[] = [];
+  let observedBytes = 0;
+  let reads = 0;
+  console.error = (message: string) => errors.push(message);
+  fs.readSync = ((descriptor: number, buffer: Buffer, offset: number, length: number) => {
+    assert.equal(descriptor, 0);
+    reads += 1;
+    const bytesRead = Math.min(length, cliSourceLimit + 1 - observedBytes);
+    buffer.fill(0, offset, offset + bytesRead);
+    observedBytes += bytesRead;
+    return bytesRead;
+  }) as typeof fs.readSync;
+  try {
+    assert.equal(
+      await runCli([
+        "project",
+        "--adapter",
+        "profile-text",
+        "--view",
+        "profile-text",
+        "--budget",
+        "1024",
+        "--renderer",
+        "json",
+        "--input",
+        "-",
+      ]),
+      1,
+    );
+    const diagnostic = JSON.parse(errors[0] ?? "{}") as {
+      code?: string;
+      details?: { limitBytes?: number; observedBytes?: number };
+    };
+    assert.equal(diagnostic.code, "INVALID_ARGUMENTS");
+    assert.equal(diagnostic.details?.limitBytes, cliSourceLimit);
+    assert.equal(diagnostic.details?.observedBytes, cliSourceLimit + 1);
+    assert.equal(observedBytes, cliSourceLimit + 1);
+    assert.ok(reads > 1);
+  } finally {
+    fs.readSync = originalReadSync;
     console.error = originalError;
   }
 });
