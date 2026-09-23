@@ -402,13 +402,15 @@ test("test executes an explicit Node test producer and emits bounded success sem
   try {
     const exitCode = await runCli(["test", "--config", config]);
     assert.equal(exitCode, 0);
-    assert.deepEqual(JSON.parse(lines.pop() ?? "{}"), {
+    const result = JSON.parse(lines.pop() ?? "{}") as Record<string, unknown>;
+    assert.deepEqual(Object.fromEntries(Object.entries(result).filter(([key]) => key !== "evidence")), {
       counts: { failed: 0, passed: 1, skipped: 0, total: 1 },
       durationMs: 2,
       failures: [],
       status: "passed",
       version: "1.0.0",
     });
+    assert.equal((result.evidence as Record<string, unknown>).execution, "executed");
     assert.deepEqual(errors, []);
   } finally {
     console.log = originalLog;

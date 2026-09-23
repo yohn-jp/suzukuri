@@ -173,6 +173,50 @@ test("a failed result is reusable while execution identity remains identical", a
   }
 });
 
+test("verification evidence records its identity and rejects stale cached provenance", async () => {
+  const directory = initRepository("suzukuri-cache-verification-evidence-");
+  try {
+    const command = {
+      argv: ["node", "producer.mjs"] as const,
+      projection: "verification-result" as const,
+      reuse: "fingerprint" as const,
+      tier: "focused" as const,
+    };
+    const lookup = await lookupExecutionCache("verify", command, { cwd: directory });
+    assert.ok(lookup);
+    const outcome = {
+      exitCode: 0,
+      signal: null,
+      printed: { version: "1.0.0", status: "passed", completeness: "complete" },
+    };
+    const evidence = await lookup.commit(outcome);
+    assert.ok(evidence);
+    assert.equal(evidence.execution, "executed");
+    assert.equal(evidence.tier, "focused");
+    assert.equal(evidence.inputFingerprint, lookup.fingerprint);
+    assert.match(evidence.identity, /^[a-f0-9]{64}$/);
+
+    const hit = await lookupExecutionCache("verify", command, { cwd: directory });
+    assert.equal(hit?.cached?.evidence?.identity, evidence.identity);
+    assert.equal(hit?.cached?.evidence?.execution, "executed");
+
+    const entryPath = path.join(directory, CACHE_DIRECTORY, `${lookup.cacheKey}.json`);
+    const entry = JSON.parse(fs.readFileSync(entryPath, "utf8")) as {
+      outcome: { evidence: { execution: string }; printed: Record<string, unknown> };
+    };
+    entry.outcome.evidence.execution = "reused";
+    fs.writeFileSync(entryPath, JSON.stringify(entry));
+    assert.equal((await lookupExecutionCache("verify", command, { cwd: directory }))?.cached, undefined);
+
+    entry.outcome.evidence.execution = "executed";
+    entry.outcome.printed.status = "failed";
+    fs.writeFileSync(entryPath, JSON.stringify(entry));
+    assert.equal((await lookupExecutionCache("verify", command, { cwd: directory }))?.cached, undefined);
+  } finally {
+    cleanup(directory);
+  }
+});
+
 test("fingerprint acquisition failure fails closed to a cache miss", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "suzukuri-cache-not-git-"));
   try {

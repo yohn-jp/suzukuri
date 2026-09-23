@@ -15,7 +15,12 @@ import {
 } from "./execution.js";
 import { GENERIC_RESULT_SCHEMA_VERSION, type GenericCommandResult } from "./generic-result.js";
 import { isTestResult } from "./test-result.js";
-import { isVerifyResult, VERIFY_RESULT_SCHEMA_VERSION, type VerifyResult } from "./verify-result.js";
+import {
+  isVerifyResult,
+  VERIFY_RESULT_SCHEMA_VERSION,
+  type VerificationEvidence,
+  type VerifyResult,
+} from "./verify-result.js";
 
 type OptionValue = string | true;
 type OutputFormat = "json" | "text";
@@ -101,7 +106,7 @@ export async function executeRegisteredCommand(
   }
   const lookup = await lookupExecutionCache(commandName, command);
   if (lookup?.cached !== undefined) {
-    const reused = markResultReused(lookup.cached.printed);
+    const reused = withEvidence(markResultReused(lookup.cached.printed), markEvidenceReused(lookup.cached.evidence));
     console.log(format === "text" ? renderText(command.projection, reused) : stableJsonStringify(reused));
     return processResultExitCode(lookup.cached);
   }
@@ -116,10 +121,12 @@ export async function executeRegisteredCommand(
       };
 
   const printed = projectOutcome(commandName, command.projection, outcome);
-  if (lookup !== undefined) {
-    await lookup.commit({ exitCode: outcome.exitCode, signal: outcome.signal, printed });
-  }
-  console.log(format === "text" ? renderText(command.projection, printed) : stableJsonStringify(printed));
+  const evidence =
+    lookup === undefined
+      ? undefined
+      : await lookup.commit({ exitCode: outcome.exitCode, signal: outcome.signal, printed });
+  const result = withEvidence(printed, evidence);
+  console.log(format === "text" ? renderText(command.projection, result) : stableJsonStringify(result));
   return processResultExitCode(outcome);
 }
 
@@ -147,6 +154,7 @@ async function runCommandSteps(
 interface StepExecutionSummary {
   readonly name: string;
   readonly execution: "executed" | "reused";
+  readonly evidence?: VerificationEvidence;
 }
 
 interface SteppedCommandOutcome {
@@ -168,7 +176,8 @@ async function runSteps(commandName: string, command: SteppedExecutionCommand): 
     let outcome: Pick<SteppedCommandOutcome, "exitCode" | "signal" | "printed">;
     if (cached !== undefined && cachedResultIsProjectable) {
       outcome = cached;
-      steps.push({ name: step.name, execution: "reused" });
+      const evidence = markEvidenceReused(cached.evidence);
+      steps.push({ name: step.name, execution: "reused", ...(evidence === undefined ? {} : { evidence }) });
     } else {
       const process = await runBoundedProcess(step.argv, { maxOutputBytes: step.budget });
       const commandOutcome: CommandOutcome = {
@@ -184,8 +193,8 @@ async function runSteps(commandName: string, command: SteppedExecutionCommand): 
         ? projectOutcome(commandName, command.projection, commandOutcome)
         : { status: "passed" };
       outcome = { exitCode: process.exitCode, signal: process.signal, printed };
-      if (lookup !== undefined) await lookup.commit({ ...outcome });
-      steps.push({ name: step.name, execution: "executed" });
+      const evidence = lookup === undefined ? undefined : await lookup.commit({ ...outcome });
+      steps.push({ name: step.name, execution: "executed", ...(evidence === undefined ? {} : { evidence }) });
     }
     finalOutcome = outcome;
     if (outcome.exitCode !== 0 || outcome.signal !== null) break;
@@ -199,6 +208,15 @@ async function runSteps(commandName: string, command: SteppedExecutionCommand): 
 function withStepExecutions(printed: unknown, steps: readonly StepExecutionSummary[]): unknown {
   if (!isRecord(printed)) return printed;
   return { ...printed, steps };
+}
+
+function markEvidenceReused(evidence: VerificationEvidence | undefined): VerificationEvidence | undefined {
+  return evidence === undefined ? undefined : { ...evidence, execution: "reused" };
+}
+
+function withEvidence(value: unknown, evidence: VerificationEvidence | undefined): unknown {
+  if (evidence === undefined || !isRecord(value)) return value;
+  return { ...value, evidence };
 }
 
 function projectOutcome(
