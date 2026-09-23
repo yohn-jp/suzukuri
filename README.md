@@ -11,9 +11,13 @@
 
 # Suzukuri
 
-**Deterministic, bounded semantic views**
+**Deterministic, bounded semantic views and verification evidence**
 
-Suzukuri is a deterministic, bounded semantic view engine. It provides an explicit adapter → semantic-contract → view → renderer pipeline for CLI and TypeScript library consumers.
+Suzukuri is a deterministic, bounded semantic view engine and repository
+verification surface. It provides an explicit adapter → semantic-contract →
+view → renderer pipeline, repository-mapped command execution, incremental
+verification reuse, and machine-readable evidence for CLI and TypeScript
+library consumers.
 
 ## Quick start
 
@@ -33,15 +37,25 @@ npx --yes suzukuri --help
 
 ## Start here
 
-Read the [practical usage manual](./docs/USAGE.md) for the library entry
-point, source views, repository-local profiles, the product boundary, and
-the v0 support matrix.
+Read the [practical usage manual](./docs/USAGE.md) for repository command
+execution, scoped verification reuse and evidence, the library entry point,
+source views, repository-local profiles, and the product boundary.
 
 ## Analysis model
 
-Suzukuri owns deterministic source decoding, semantic-contract validation, view selection, bounded projection, provenance, and rendering. The caller owns task classification, adapter/view selection, source lifetime, execution policy, and any higher-level orchestration.
+Suzukuri owns deterministic source decoding, semantic-contract validation, view
+selection, bounded projection, repository-mapped execution, content
+fingerprinting, and verification evidence. The caller owns task classification,
+source/profile selection, repository declarations, execution policy, and
+higher-level orchestration.
 
-Every projection carries component identities, source provenance when supplied, a stable projection digest, completeness, and machine-readable loss metadata. A UTF-8 byte budget is a hard ceiling: required meaning is retained or the projection fails explicitly with `BUDGET_TOO_SMALL`.
+Every projection carries component identities, an authoritative SHA-256 source
+digest, a stable projection digest, completeness, and machine-readable loss
+metadata. Verification producers can additionally carry explicit input scopes
+and tiers; unchanged stepped producers can reuse canonical PASS/FAIL evidence
+without rerunning. A UTF-8 byte budget remains a hard projection ceiling:
+required meaning is retained or projection fails explicitly with
+`BUDGET_TOO_SMALL`.
 
 ## Development
 
@@ -50,7 +64,9 @@ pnpm install --frozen-lockfile
 pnpm run verify
 ```
 
-`pnpm run verify` is the repository's authoritative local verification entry point. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution workflow.
+`pnpm run verify` is the repository's authoritative local verification entry
+point. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution
+workflow.
 
 ## Security
 
